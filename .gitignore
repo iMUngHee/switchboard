@@ -1,5 +1,7 @@
-# Compiled binary: a bare `go build ./cmd/switchboard` drops it here.
+# Compiled binaries: a bare `go build ./cmd/switchboard` drops one here, and
+# `make dist` fills dist/.
 /switchboard
+/dist/
 *.exe
 
 # Agent planning state: per-task plans, worktree reservations, session notes.
