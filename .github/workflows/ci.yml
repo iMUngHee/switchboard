@@ -32,6 +32,68 @@ jobs:
       # No private pattern file exists in CI, so this checks the generic rules.
       - run: go run ./tools/hygiene
 
+  # Real mail both ways between two real pager stores through the round
+  # engine, the far store behind an exec endpoint.
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -tags e2e -count=1 -v ./internal/e2e
+
+  # The same through the ssh preset, to an sshd on localhost whose sessions
+  # get the far store's database through SetEnv.
+  ssh-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: start an sshd on localhost
+        run: |
+          set -eu
+          test -x /usr/sbin/sshd || { sudo apt-get update -q && sudo apt-get install -y -q openssh-server; }
+          d="$RUNNER_TEMP/sshd"
+          mkdir -p "$d" "$RUNNER_TEMP/far"
+          chmod 700 "$d"
+          ssh-keygen -q -t ed25519 -N '' -f "$d/host_key"
+          ssh-keygen -q -t ed25519 -N '' -f "$d/client_key"
+          cp "$d/client_key.pub" "$d/authorized_keys"
+          chmod 600 "$d/authorized_keys"
+          far_db="$RUNNER_TEMP/far/b.db"
+          cat > "$d/sshd_config" <<EOF
+          Port 2222
+          ListenAddress 127.0.0.1
+          HostKey $d/host_key
+          AuthorizedKeysFile $d/authorized_keys
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          UsePAM yes
+          StrictModes no
+          PidFile $d/sshd.pid
+          SetEnv PAGER_DB=$far_db PAGER_WAKE=off PAGER_CLIENT=none
+          EOF
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -f "$d/sshd_config" -E "$d/sshd.log"
+          {
+            echo "SWITCHBOARD_E2E_SSH_PORT=2222"
+            echo "SWITCHBOARD_E2E_SSH_KEY=$d/client_key"
+            echo "SWITCHBOARD_E2E_FAR_DB=$far_db"
+          } >> "$GITHUB_ENV"
+      - run: go test -tags e2e -count=1 -v ./internal/e2e
+      - name: sshd log
+        if: failure()
+        run: sudo cat "$RUNNER_TEMP/sshd/sshd.log"
+
   # Plan step 4: can a console-less switchboard run as a Task Scheduler task
   # for the runner's user, stay up, and start console children without opening
   # windows? The spike heartbeats into a log and records each child's console.

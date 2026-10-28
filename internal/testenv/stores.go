@@ -24,12 +24,23 @@ type Stores struct {
 
 // NewStores makes the two stores in a temporary directory. Nothing they do
 // may wake a real session on this machine, so wakes are off for the test.
-func NewStores(t *testing.T) *Stores {
+func NewStores(t *testing.T) *Stores { return NewStoresAt(t, "") }
+
+// NewStoresAt is NewStores with B's database at farDB, for a far side that
+// finds its store by itself (an sshd that sets PAGER_DB). An empty farDB
+// means the temporary directory. farDB must not exist yet, so a test can
+// never enroll peers in, or send from, a store someone uses.
+func NewStoresAt(t *testing.T, farDB string) *Stores {
 	t.Helper()
 	t.Setenv("PAGER_WAKE", "off")
 	t.Setenv("PAGER_CLIENT", "none")
 	dir := t.TempDir()
-	s := &Stores{Pager: Pager(t), A: filepath.Join(dir, "a.db"), B: filepath.Join(dir, "b.db")}
+	if farDB == "" {
+		farDB = filepath.Join(dir, "b.db")
+	} else if _, err := os.Lstat(farDB); err == nil || !filepath.IsAbs(farDB) {
+		t.Fatalf("the far store %q must be an absolute path that does not exist yet", farDB)
+	}
+	s := &Stores{Pager: Pager(t), A: filepath.Join(dir, "a.db"), B: farDB}
 	s.Local = transport.LocalEndpoint{Pager: s.Pager, DB: s.A}
 	s.Far = transport.ExecEndpoint{Argv: []string{s.Pager}, Env: map[string]string{"PAGER_DB": s.B}}
 	s.Run(t, s.A, "attach", "--session", "s-a", "--tool", "claude", "--root", dir)
