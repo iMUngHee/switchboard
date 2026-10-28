@@ -149,25 +149,38 @@ var (
 	safeRemotePath = regexp.MustCompile(`^/[A-Za-z0-9/._~+-]*$`)
 	safeArg        = regexp.MustCompile(`^[A-Za-z0-9._=-]+$`)
 	// safeHost admits host names, ssh_config aliases, user@host and bracketed
-	// IPv6 literals. Nothing else: a '%' or a shell character in the host
-	// can reach a local shell through a ProxyCommand's %h on older OpenSSH
-	// (CVE-2023-51385).
-	safeHost = regexp.MustCompile(`^[A-Za-z0-9._-]+(@[A-Za-z0-9._-]+)?$|^([A-Za-z0-9._-]+@)?\[[0-9A-Fa-f:.]+\]$`)
+	// IPv6 literals, each part starting with a letter or digit. Nothing else:
+	// a '%' or a shell character in the host can reach a local shell through
+	// a ProxyCommand's %h on older OpenSSH (CVE-2023-51385), and a leading
+	// '-' can reach the ProxyCommand as an option.
+	safeHost = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._-]*@)?([A-Za-z0-9][A-Za-z0-9._-]*|\[[0-9A-Fa-f:.]+\])$`)
 )
 
 // ValidateSSH refuses what the ssh preset cannot carry safely.
 func ValidateSSH(s SSHEndpoint) error {
-	switch {
-	case !filepath.IsAbs(s.SSH):
+	if !filepath.IsAbs(s.SSH) {
 		return fmt.Errorf("ssh client %q is not an absolute path", s.SSH)
-	case s.Host == "":
-		return fmt.Errorf("ssh host is empty")
-	case strings.HasPrefix(s.Host, "-"):
-		return fmt.Errorf("ssh host %q starts with '-'", s.Host)
-	case !safeHost.MatchString(s.Host):
-		return fmt.Errorf("ssh host %q may use only letters, digits, ._- and one @ (or a [bracketed] IPv6 address)", s.Host)
-	case !safeRemotePath.MatchString(s.Pager):
-		return fmt.Errorf("remote pager %q must be an absolute path of letters, digits and /._~+-", s.Pager)
+	}
+	if err := ValidateHost(s.Host); err != nil {
+		return err
+	}
+	return ValidateRemotePager(s.Pager)
+}
+
+// ValidateHost refuses an ssh destination outside host-name characters.
+// Configuration checks use it too, so a host is refused when it is read.
+func ValidateHost(h string) error {
+	if !safeHost.MatchString(h) {
+		return fmt.Errorf("%q is not a host: use letters, digits and ._-, starting with a letter or digit, an optional user@, or a [bracketed] IPv6 address", h)
+	}
+	return nil
+}
+
+// ValidateRemotePager refuses a far-side pager path the remote command line
+// could not carry unquoted.
+func ValidateRemotePager(p string) error {
+	if !safeRemotePath.MatchString(p) {
+		return fmt.Errorf("%q must be an absolute path of A-Z, a-z, 0-9 and /._~+- only", p)
 	}
 	return nil
 }
