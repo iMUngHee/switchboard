@@ -20,7 +20,7 @@ import (
 
 // step is what one invocation does, in this order: read stdin (unless
 // skip_stdin), sleep, write stderr, write stdout, maybe leave a child holding
-// stdout, then exit.
+// stdout, maybe kill itself, then exit.
 type step struct {
 	Stdout      string `json:"stdout"`
 	StdoutBytes int    `json:"stdout_bytes"` // then this many 'x' bytes
@@ -30,6 +30,7 @@ type step struct {
 	SleepMS     int    `json:"sleep_ms"`
 	SkipStdin   bool   `json:"skip_stdin"`
 	LeaveChild  bool   `json:"leave_child"`
+	KillSelf    bool   `json:"kill_self"` // end by os.Kill: SIGKILL on Unix
 }
 
 func main() {
@@ -80,6 +81,11 @@ func main() {
 		c.Env = append(os.Environ(), "TESTPAGER_CHILD=1")
 		c.Stdout = os.Stdout
 		_ = c.Start()
+	}
+	if s.KillSelf {
+		if p, err := os.FindProcess(os.Getpid()); err == nil {
+			_ = p.Signal(os.Kill)
+		}
 	}
 	os.Exit(s.Exit)
 }
