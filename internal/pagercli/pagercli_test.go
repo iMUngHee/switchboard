@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -178,10 +179,18 @@ func TestChattyStderrNeverBlocks(t *testing.T) {
 }
 
 func TestRunRefusesUnsafeInput(t *testing.T) {
-	// Paths that do not exist: should a check regress, nothing real starts.
-	ssh := transport.SSHEndpoint{SSH: "/nonexistent/ssh", Host: "vm.example.com", Pager: "/usr/local/bin/pager"}
-	exe := transport.ExecEndpoint{Argv: []string{"/nonexistent/wsl.exe", "/usr/local/bin/pager"}}
+	// Programs that do not exist: should a check regress, nothing real starts.
+	missing := "/nonexistent/"
+	if runtime.GOOS == "windows" {
+		missing = `C:\nonexistent\`
+	}
+	ssh := transport.SSHEndpoint{SSH: missing + "ssh", Host: "vm.example.com", Pager: "/usr/local/bin/pager"}
+	exe := transport.ExecEndpoint{Argv: []string{missing + "wsl.exe", "/usr/local/bin/pager"}}
 	for name, ep := range map[string]transport.Endpoint{"ssh": ssh, "exec": exe} {
+		// The endpoint itself is valid, so only the argument can be refused.
+		if err := ep.Validate(); err != nil {
+			t.Fatalf("%s: the endpoint is refused before the argument is looked at: %v", name, err)
+		}
 		if _, err := (Runner{}).Run(t.Context(), ep, nil, "relay", "out", "--peer", "vm;id"); err == nil {
 			t.Errorf("%s: an unsafe argument got through", name)
 		}

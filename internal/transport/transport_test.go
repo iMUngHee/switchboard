@@ -1,14 +1,24 @@
 package transport
 
 import (
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 )
 
+// localBin is an absolute path to a program on this machine, in this
+// system's form. Paths on the far side of ssh stay POSIX everywhere.
+func localBin(name string) string {
+	if runtime.GOOS == "windows" {
+		return `C:\bin\` + name + ".exe"
+	}
+	return "/usr/bin/" + name
+}
+
 func TestSSHArgv(t *testing.T) {
 	base := SSHEndpoint{
-		SSH:     "/usr/bin/ssh",
+		SSH:     localBin("ssh"),
 		Host:    "vm.example.com",
 		Pager:   "/home/me/.local/bin/pager",
 		Options: []string{"-o", "ServerAliveInterval=5", "-i", "/home/me/.ssh/relay"},
@@ -16,7 +26,7 @@ func TestSSHArgv(t *testing.T) {
 
 	t.Run("layout", func(t *testing.T) {
 		c := base.Command("relay", "out", "--peer", "laptop", "--limit", "100")
-		if c.Path != "/usr/bin/ssh" {
+		if c.Path != base.SSH {
 			t.Fatalf("path %q", c.Path)
 		}
 		want := []string{
@@ -94,15 +104,15 @@ func TestLocalEndpointOwnsPagerDB(t *testing.T) {
 		}
 		return vals
 	}
-	c := LocalEndpoint{Pager: "/usr/local/bin/pager", DB: "/data/msg.db"}.Command("relay", "id")
+	c := LocalEndpoint{Pager: localBin("pager"), DB: "/data/msg.db"}.Command("relay", "id")
 	if got := envOf(c, "PAGER_DB"); !slices.Equal(got, []string{"/data/msg.db"}) {
 		t.Fatalf("PAGER_DB = %q, want only the configured one", got)
 	}
-	c = LocalEndpoint{Pager: "/usr/local/bin/pager"}.Command("relay", "id")
+	c = LocalEndpoint{Pager: localBin("pager")}.Command("relay", "id")
 	if got := envOf(c, "PAGER_DB"); len(got) != 0 {
 		t.Fatalf("an inherited PAGER_DB survived: %q", got)
 	}
-	if c.Path != "/usr/local/bin/pager" || !slices.Equal(c.Args, []string{"relay", "id"}) {
+	if c.Path != localBin("pager") || !slices.Equal(c.Args, []string{"relay", "id"}) {
 		t.Fatalf("command %+v", c)
 	}
 }
@@ -141,16 +151,16 @@ func TestEveryEndpointValidates(t *testing.T) {
 	for name, ep := range map[string]Endpoint{
 		"relative local pager": LocalEndpoint{Pager: "pager"},
 		"empty exec argv":      ExecEndpoint{},
-		"unsafe ssh pager":     SSHEndpoint{SSH: "/usr/bin/ssh", Host: "vm", Pager: "/opt/x;id"},
+		"unsafe ssh pager":     SSHEndpoint{SSH: localBin("ssh"), Host: "vm", Pager: "/opt/x;id"},
 	} {
 		if err := ep.Validate(); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
 	for name, ep := range map[string]Endpoint{
-		"local": LocalEndpoint{Pager: "/usr/local/bin/pager"},
+		"local": LocalEndpoint{Pager: localBin("pager")},
 		"exec":  ExecEndpoint{Argv: []string{"docker", "exec", "-i", "box", "/usr/local/bin/pager"}},
-		"ssh":   SSHEndpoint{SSH: "/usr/bin/ssh", Host: "vm", Pager: "/usr/local/bin/pager"},
+		"ssh":   SSHEndpoint{SSH: localBin("ssh"), Host: "vm", Pager: "/usr/local/bin/pager"},
 	} {
 		if err := ep.Validate(); err != nil {
 			t.Errorf("%s: refused: %v", name, err)
