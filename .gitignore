@@ -1,0 +1,11 @@
+# Compiled binary: a bare `go build ./cmd/switchboard` drops it here.
+/switchboard
+*.exe
+
+# Agent planning state: per-task plans, worktree reservations, session notes.
+# Local working material, and it names other projects and people — it must not
+# reach the repo.
+.agents/
+
+# OS / editor noise.
+.DS_Store
