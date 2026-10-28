@@ -32,6 +32,60 @@ jobs:
       # No private pattern file exists in CI, so this checks the generic rules.
       - run: go run ./tools/hygiene
 
+  # Plan step 4: can a console-less switchboard run as a Task Scheduler task
+  # for the runner's user, stay up, and start console children without opening
+  # windows? The spike heartbeats into a log and records each child's console.
+  windows-spike:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build
+        run: |
+          go build -o sb.exe ./cmd/switchboard
+          go build -ldflags=-H=windowsgui -o sbw.exe ./cmd/switchboard
+      - name: install, observe, uninstall
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'spike.log'
+          $here = (Get-Location).Path
+          & .\sb.exe spike install --name switchboard-spike --exe "$here\sbw.exe" --child "$here\sb.exe" --log $log
+          if ($LASTEXITCODE -ne 0) { throw "install failed" }
+          $xml = schtasks /Query /TN switchboard-spike /XML | Out-String
+          if ($xml -notmatch '<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>') { throw "the task has a time limit" }
+          Start-Sleep -Seconds 30
+          $lines = @(Get-Content $log)
+          $beats = @($lines | Where-Object { $_ -like 'heartbeat*' }).Count
+          $consoles = @($lines | Where-Object { $_ -like 'console*' })
+          $failed = @($lines | Where-Object { $_ -like 'child failed*' })
+          Write-Host "heartbeats=$beats children=$($consoles.Count) values=$($consoles -join ', ') failures=$($failed -join '; ')"
+          if ($beats -lt 20) { throw "too few heartbeats: the task did not stay up" }
+          if ($failed.Count -gt 0) { throw "a console child failed" }
+          if ($consoles.Count -lt 3) { throw "too few console children ran" }
+          if (@($consoles | Where-Object { $_ -ne 'console 0' }).Count -gt 0) { throw "a console child got a console window" }
+          if (-not (Get-Process sbw -ErrorAction SilentlyContinue)) { throw "the daemon is not running" }
+          & .\sb.exe spike uninstall --name switchboard-spike
+          if ($LASTEXITCODE -ne 0) { throw "uninstall failed" }
+          Start-Sleep -Seconds 3
+          if (Get-Process sbw -ErrorAction SilentlyContinue) { throw "the daemon outlived its task" }
+          schtasks /Query /TN switchboard-spike 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) { throw "the task is still registered" }
+          exit 0
+      # Whatever failed above, leave no task or daemon behind, and show the log.
+      - name: clean up
+        if: always()
+        shell: pwsh
+        run: |
+          schtasks /End /TN switchboard-spike 2>$null | Out-Null
+          schtasks /Delete /TN switchboard-spike /F 2>$null | Out-Null
+          Get-Process sbw -ErrorAction SilentlyContinue | Stop-Process -Force
+          $log = Join-Path $env:RUNNER_TEMP 'spike.log'
+          if (Test-Path $log) { Get-Content $log -Tail 40 }
+          exit 0
+
   # Pure-Go release builds for every target, including the console-less
   # Windows daemon.
   dist:

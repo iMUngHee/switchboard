@@ -17,9 +17,12 @@ func main() {
 }
 
 func run(args []string) int {
-	if len(args) == 1 && (args[0] == "version" || args[0] == "--version") {
+	switch {
+	case len(args) == 1 && (args[0] == "version" || args[0] == "--version"):
 		fmt.Println("switchboard", version)
 		return 0
+	case len(args) >= 1 && args[0] == "spike":
+		return spike(args[1:])
 	}
 	fmt.Fprintln(os.Stderr, "usage: switchboard version")
 	return 2
