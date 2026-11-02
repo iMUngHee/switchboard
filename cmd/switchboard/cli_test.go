@@ -245,6 +245,95 @@ func TestCLIEndToEnd(t *testing.T) {
 	})
 }
 
+// TestStatusShowsWaiting: with a switchboard holding the link, status says per
+// direction whether it waits on relay wait or polls a side without it, in
+// text and in --json; with none, or with the link stopped, it says neither.
+func TestStatusShowsWaiting(t *testing.T) {
+	sandbox(t)
+	s := testenv.NewStores(t)
+	cfg := writeConfig(t, s.Pager, s.A, []string{s.Pager}, map[string]string{"PAGER_DB": s.B})
+	dir, err := paths.StateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	key := state.Key(strings.TrimSpace(string(s.Run(t, s.A, "relay", "id"))), "vm")
+	since := time.Date(2026, 11, 2, 10, 37, 6, 0, time.UTC)
+	until := since.Add(time.Hour)
+	stored := state.Link{
+		Outbound: state.Direction{Class: "idle", WaitingSince: since},
+		Inbound:  state.Direction{Class: "idle", NoWaitUntil: until},
+	}
+	save := func(l state.Link) {
+		t.Helper()
+		if err := state.Save(dir, key, l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// lines returns the outbound and inbound lines of the text status.
+	lines := func() (out, in string) {
+		t.Helper()
+		for _, line := range strings.Split(mustCLI(t, "status", "--config", cfg), "\n") {
+			switch f := strings.Fields(line); {
+			case len(f) > 0 && f[0] == "outbound":
+				out = line
+			case len(f) > 0 && f[0] == "inbound":
+				in = line
+			}
+		}
+		return out, in
+	}
+	quiet := func(when string) {
+		t.Helper()
+		out, in := lines()
+		for _, line := range []string{out, in} {
+			if !strings.HasSuffix(line, "  -") || strings.Contains(line, "waiting since") || strings.Contains(line, "polling") {
+				t.Errorf("%s: %q, want the wait column to read -", when, line)
+			}
+		}
+		raw := mustCLI(t, "status", "--config", cfg, "--json")
+		if strings.Contains(raw, "waiting_since") || strings.Contains(raw, "no_wait_until") {
+			t.Errorf("%s: status --json shows a wait:\n%s", when, raw)
+		}
+	}
+
+	save(stored)
+	quiet("no daemon")
+
+	lock, err := state.TryLock(dir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	out, in := lines()
+	if want := "waiting since " + since.Local().Format(time.DateTime); !strings.HasSuffix(out, want) {
+		t.Errorf("outbound: %q, want it to end %q", out, want)
+	}
+	if want := "polling: no relay wait there, asks again " + until.Local().Format(time.DateTime); !strings.HasSuffix(in, want) {
+		t.Errorf("inbound: %q, want it to end %q", in, want)
+	}
+	raw := mustCLI(t, "status", "--config", cfg, "--json")
+	var st statusOut
+	if err := json.Unmarshal([]byte(raw), &st); err != nil || len(st.Links) != 1 {
+		t.Fatalf("status --json: %v\n%s", err, raw)
+	}
+	o, i := st.Links[0].Outbound, st.Links[0].Inbound
+	if o.WaitingSince == nil || !o.WaitingSince.Equal(since) || o.NoWaitUntil != nil ||
+		i.NoWaitUntil == nil || !i.NoWaitUntil.Equal(until) || i.WaitingSince != nil {
+		t.Errorf("status --json with a daemon: outbound %+v, inbound %+v", o, i)
+	}
+	if !strings.Contains(raw, `"waiting_since": "`) || !strings.Contains(raw, `"no_wait_until": "`) {
+		t.Errorf("status --json does not name them waiting_since and no_wait_until:\n%s", raw)
+	}
+
+	// A stopped link neither waits nor polls, whatever its state still says.
+	stored.NeedsHuman = true
+	save(stored)
+	quiet("stopped, with a daemon")
+}
+
 var (
 	buildOnce sync.Once
 	binPath   string

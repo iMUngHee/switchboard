@@ -51,6 +51,8 @@ type Direction struct {
 	LastSuccess         time.Time `json:"last_success,omitzero"` // last round with finals
 	LastContact         time.Time `json:"last_contact,omitzero"` // last stage that reached the far side and exited as pager does
 	NotBefore           time.Time `json:"not_before,omitzero"`
+	WaitingSince        time.Time `json:"waiting_since,omitzero"` // waiting on relay wait since then
+	NoWaitUntil         time.Time `json:"no_wait_until,omitzero"` // the From side has no relay wait: polling until then
 	ConsecutiveFailures int       `json:"consecutive_failures,omitempty"`
 	// PendingAck holds correlated result lines awaiting `relay ack`,
 	// verbatim, each without its LF. They are written here before ack runs,
@@ -67,14 +69,16 @@ type Link struct {
 	NeedsHuman      bool      `json:"needs_human,omitempty"` // survives restarts
 }
 
-// Resume clears what holds a link back — its needs-human mark and each
-// direction's backoff — so its next round runs at once. Everything else,
-// pending results above all, stays.
+// Resume clears what holds a link back — its needs-human mark, each
+// direction's backoff, and a From side's missing relay wait — so its next
+// round runs at once and its next idle pause asks for relay wait again.
+// Everything else, pending results above all, stays.
 func (l *Link) Resume() {
 	l.NeedsHuman = false
 	for _, d := range []*Direction{&l.Outbound, &l.Inbound} {
 		d.NotBefore = time.Time{}
 		d.ConsecutiveFailures = 0
+		d.NoWaitUntil = time.Time{}
 	}
 }
 

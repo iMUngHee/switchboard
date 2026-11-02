@@ -134,6 +134,16 @@ func Open(ctx context.Context, opt Options) (*Link, error) {
 		return nil, err
 	}
 	st.LastLocalStore = id
+	// What a process before this one was doing about relay wait is not what
+	// this one does: a stored wait is a crash's leftover, and a restart,
+	// usually after an upgrade, asks a side without relay wait again at once.
+	// status reads the file, so what is cleared is saved at once below, not
+	// left there until a backoff and a round have passed.
+	stale := false
+	for _, d := range []*state.Direction{&st.Outbound, &st.Inbound} {
+		stale = stale || !d.WaitingSince.IsZero() || !d.NoWaitUntil.IsZero()
+		d.WaitingSince, d.NoWaitUntil = time.Time{}, time.Time{}
+	}
 
 	l := &Link{opt: opt, key: key, lock: lock, st: st, notified: Healthy,
 		now: wallClock, jitter: spread, runRound: func(ctx context.Context, e *round.Engine, d round.Direction, in round.Input) round.Outcome {
@@ -148,6 +158,11 @@ func Open(ctx context.Context, opt Options) (*Link, error) {
 		round: round.Direction{Link: opt.Name, Name: "inbound", From: round.Side{Endpoint: far, Peer: cfg.RemotePeer}, To: round.Side{Endpoint: local, Peer: cfg.Peer}}}
 	for i := range l.wake {
 		l.wake[i] = make(chan struct{}, 1)
+	}
+	if stale {
+		l.mu.Lock()
+		l.save()
+		l.mu.Unlock()
 	}
 	return l, nil
 }
@@ -218,7 +233,7 @@ func (l *Link) mayWait(d *direction) bool {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return d.settled && !l.st.NeedsHuman && !l.now().Before(d.noWaitUntil)
+	return d.settled && !l.st.NeedsHuman && !l.now().Before(d.st.NoWaitUntil)
 }
 
 // await runs relay wait on the side d's mail comes from and returns when it
@@ -228,6 +243,15 @@ func (l *Link) mayWait(d *direction) bool {
 // the network. A wait holds no round slot and does not get the grace rounds
 // get at shutdown. It is always ended and reaped before await returns.
 func (l *Link) await(ctx context.Context, i int, d *direction) bool {
+	// Saved, so status can say the direction is waiting and since when. The
+	// round that follows clears it in its own save. A mark that the From side
+	// has no relay wait has run out by now (see mayWait): it goes, so status
+	// never shows it once relay wait is asked again.
+	l.mu.Lock()
+	d.st.WaitingSince = l.now()
+	d.st.NoWaitUntil = time.Time{}
+	l.save()
+	l.mu.Unlock()
 	wctx, cancel := context.WithCancel(ctx)
 	answer := make(chan waitAnswer, 1)
 	started, wallStarted := time.Now(), l.now()
@@ -291,12 +315,19 @@ func (l *Link) answered(ctx context.Context, i int, d *direction, a waitAnswer) 
 		return true
 	case waitTimeout:
 		return true
-	case waitMissing:
-		l.mu.Lock()
-		d.noWaitUntil = l.now().Add(WaitRetry)
-		l.mu.Unlock()
+	}
+	// A poll sleep comes first, so the wait is over now rather than at the
+	// next round: status must not show it waiting through the sleep.
+	l.mu.Lock()
+	d.st.WaitingSince = time.Time{}
+	if a == waitMissing {
+		d.st.NoWaitUntil = l.now().Add(WaitRetry)
+	}
+	l.save()
+	l.mu.Unlock()
+	if a == waitMissing {
 		l.opt.Log.Info("relay wait unavailable, polling", "link", l.opt.Name, "direction", d.name, "retry_in", WaitRetry.String())
-	default:
+	} else {
 		l.opt.Log.Debug("relay wait failed, polling once", "link", l.opt.Name, "direction", d.name)
 	}
 	return l.sleep(ctx, i, d.poll)
@@ -505,7 +536,6 @@ func (l *Link) Resume() {
 		d.reruns, d.drained = 0, 0
 		d.endStreak()
 		d.isDegraded = false
-		d.noWaitUntil = time.Time{}
 	}
 	l.save()
 	l.mu.Unlock()

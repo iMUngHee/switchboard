@@ -78,7 +78,10 @@ name a peer other than the one pager lists.
   pager to say when mail is waiting, and runs its next round about a second
   after it is, or after five minutes at the latest. The intervals apply after a
   failure or a deferral, and against a pager without `relay wait`, which is
-  asked again an hour later.
+  asked again an hour later. While switchboard runs, `switchboard status` shows
+  which a direction is doing: `waiting since` a time, or
+  `polling: no relay wait there, asks again` at a time (in `--json`,
+  waiting_since and no_wait_until).
 - `hint` is what to do when the link needs you. For an ssh link it defaults to
   running `ssh HOST` once, which is what a laptop needs after a night's sleep.
 

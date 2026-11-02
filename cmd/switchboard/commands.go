@@ -146,6 +146,12 @@ type directionStatus struct {
 	LastContact *time.Time `json:"last_contact,omitempty"`
 	LastSuccess *time.Time `json:"last_success,omitempty"`
 	NotBefore   *time.Time `json:"not_before,omitempty"`
+	// What a running, unstopped switchboard does between rounds: wait on
+	// relay wait since then, or poll until then because the side the mail
+	// comes from has no relay wait. Never set otherwise, since nothing is
+	// waiting or polling then and a crash can leave either behind.
+	WaitingSince *time.Time `json:"waiting_since,omitempty"`
+	NoWaitUntil  *time.Time `json:"no_wait_until,omitempty"`
 }
 
 type linkStatus struct {
@@ -196,11 +202,12 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		}
 		cfg := a.cfg.Links[n]
 		heard := latest(st.Outbound.LastContact, st.Inbound.LastContact, st.Outbound.LastSuccess, st.Inbound.LastSuccess)
+		live := held && !st.NeedsHuman
 		out = append(out, linkStatus{
 			Name: n, Key: key, Daemon: held, NeedsHuman: st.NeedsHuman,
 			Stale:      !held && (heard.IsZero() || now.Sub(heard) > 2*max(cfg.PollOutbound, cfg.PollInbound)),
 			LocalStore: st.LastLocalStore, RemoteStore: st.LastRemoteStore,
-			Outbound: dirStatus(st.Outbound), Inbound: dirStatus(st.Inbound),
+			Outbound: dirStatus(st.Outbound, live), Inbound: dirStatus(st.Inbound, live),
 		})
 	}
 
@@ -242,23 +249,36 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 			if d.Code != "" {
 				class += " (" + d.Code + ")"
 			}
-			fmt.Fprintf(w, "  %s\t%s\tpending %d\tcontact %s\tdelivered %s\tnext %s\n",
-				directionNames[i], class, d.Pending, when(d.LastContact), when(d.LastSuccess), when(d.NotBefore))
+			between := "-"
+			switch {
+			case d.WaitingSince != nil:
+				between = "waiting since " + when(d.WaitingSince)
+			case d.NoWaitUntil != nil:
+				between = "polling: no relay wait there, asks again " + when(d.NoWaitUntil)
+			}
+			fmt.Fprintf(w, "  %s\t%s\tpending %d\tcontact %s\tdelivered %s\tnext %s\t%s\n",
+				directionNames[i], class, d.Pending, when(d.LastContact), when(d.LastSuccess), when(d.NotBefore), between)
 		}
 		w.Flush()
 	}
 	return 0
 }
 
-func dirStatus(d state.Direction) directionStatus {
+// dirStatus is d as status shows it; live says a running switchboard holds
+// the link and has not stopped it.
+func dirStatus(d state.Direction, live bool) directionStatus {
 	opt := func(t time.Time) *time.Time {
 		if t.IsZero() {
 			return nil
 		}
 		return &t
 	}
-	return directionStatus{Class: d.Class, Code: d.Code, Pending: len(d.PendingAck), Failures: d.ConsecutiveFailures,
+	s := directionStatus{Class: d.Class, Code: d.Code, Pending: len(d.PendingAck), Failures: d.ConsecutiveFailures,
 		LastContact: opt(d.LastContact), LastSuccess: opt(d.LastSuccess), NotBefore: opt(d.NotBefore)}
+	if live {
+		s.WaitingSince, s.NoWaitUntil = opt(d.WaitingSince), opt(d.NoWaitUntil)
+	}
+	return s
 }
 
 func when(t *time.Time) string {

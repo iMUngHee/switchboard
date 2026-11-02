@@ -46,9 +46,8 @@ type direction struct {
 	streakAt   []time.Time // when each failure of that streak happened, within DegradedWindow
 	isDegraded bool        // a streak got long enough; it holds until a success or a resume
 
-	settled     bool      // the last round left nothing to carry, so the next pause may wait for mail
-	woke        bool      // the pause before the last round ended on relay wait's "ready"
-	noWaitUntil time.Time // relay wait is missing on the From side: poll until then
+	settled bool // the last round left nothing to carry, so the next pause may wait for mail
+	woke    bool // the pause before the last round ended on relay wait's "ready"
 }
 
 // after records outcome o, which ended at now, and returns how long to wait
@@ -68,6 +67,7 @@ func (d *direction) after(o round.Outcome, now time.Time, jitter func(time.Durat
 	st := d.st
 	st.Class, st.Code = string(o.Class), o.Code
 	st.PendingAck = o.Pending
+	st.WaitingSince = time.Time{} // a round ran, so whatever wait came before it is over
 	if o.Limit > 0 {
 		d.limit = o.Limit
 	}

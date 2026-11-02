@@ -69,7 +69,7 @@ func TestPendingAckSurvivesRestart(t *testing.T) {
 			ConsecutiveFailures: 2,
 			PendingAck:          pending,
 		},
-		Inbound:         Direction{Class: "idle", LastContact: at(2)},
+		Inbound:         Direction{Class: "idle", LastContact: at(2), WaitingSince: at(4), NoWaitUntil: at(5)},
 		LastLocalStore:  storeID,
 		LastRemoteStore: "fedcba9876543210fedcba9876543210",
 		NeedsHuman:      true,
@@ -126,13 +126,15 @@ func TestControlWithoutDaemon(t *testing.T) {
 			LastContact: at(5), NotBefore: at(50), ConsecutiveFailures: 4,
 			PendingAck: pending,
 		},
-		Inbound:    Direction{Class: "retry", NotBefore: at(40), ConsecutiveFailures: 1},
+		Inbound:    Direction{Class: "retry", NotBefore: at(40), ConsecutiveFailures: 1, WaitingSince: at(6), NoWaitUntil: at(55)},
 		NeedsHuman: true,
 	}
+	// A resume asks a side without relay wait again; a wait in progress is
+	// the round's to clear.
 	resumed := stuck
 	resumed.NeedsHuman = false
 	resumed.Outbound.NotBefore, resumed.Outbound.ConsecutiveFailures = time.Time{}, 0
-	resumed.Inbound.NotBefore, resumed.Inbound.ConsecutiveFailures = time.Time{}, 0
+	resumed.Inbound.NotBefore, resumed.Inbound.ConsecutiveFailures, resumed.Inbound.NoWaitUntil = time.Time{}, 0, time.Time{}
 
 	t.Run("no holder: resume applies it", func(t *testing.T) {
 		mustSave(t, dir, key, stuck)

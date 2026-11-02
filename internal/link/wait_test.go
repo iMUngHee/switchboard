@@ -12,9 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/iMUngHee/switchboard/internal/config"
 	"github.com/iMUngHee/switchboard/internal/pagercli"
 	"github.com/iMUngHee/switchboard/internal/proc"
 	"github.com/iMUngHee/switchboard/internal/round"
+	"github.com/iMUngHee/switchboard/internal/state"
 	"github.com/iMUngHee/switchboard/internal/testenv"
 	"github.com/iMUngHee/switchboard/internal/transport"
 )
@@ -440,6 +442,184 @@ func TestWaitFallsBackWithoutRelayWait(t *testing.T) {
 	if n := runs.Load(); n < 16 {
 		t.Fatalf("only %d rounds ran: polling did not carry on", n)
 	}
+}
+
+// savedInbound reads the inbound direction as the state file has it.
+func savedInbound(t *testing.T, l *Link) state.Direction {
+	t.Helper()
+	st, err := state.Load(l.opt.StateDir, l.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Inbound
+}
+
+// TestStateRecordsTheWait: the state file says since when a direction has
+// waited on relay wait, and until when it polls a side without one, so status
+// can show both (plan status-shows-wait).
+func TestStateRecordsTheWait(t *testing.T) {
+	idleRound := func(l *Link) {
+		l.runRound = always(idle)
+		l.step(t.Context(), l.dirs[1])
+	}
+	pauseIn := func(l *Link) chan bool {
+		done := make(chan bool, 1)
+		go func() { done <- l.pause(t.Context(), 1, l.dirs[1], l.dirs[1].poll) }()
+		return done
+	}
+
+	t.Run("a wait is saved as it begins, and the next round clears it", func(t *testing.T) {
+		c := newClock()
+		w := newWaiter()
+		w.block = true
+		l := waitLink(t, c, w)
+		idleRound(l)
+		began := c.now()
+		done := pauseIn(l)
+		<-w.started
+		if got := savedInbound(t, l).WaitingSince; !got.Equal(began) {
+			t.Fatalf("saved WaitingSince %v during the wait, want %v", got, began)
+		}
+		c.add(time.Minute)
+		l.wakeAll()
+		if !<-done {
+			t.Fatal("the pause reported a cancelled context")
+		}
+		idleRound(l)
+		if got := savedInbound(t, l).WaitingSince; !got.IsZero() {
+			t.Fatalf("saved WaitingSince %v after the next round, want none", got)
+		}
+	})
+
+	// Both sleep a poll before the next round; through that sleep the saved
+	// state must not say the direction waits.
+	for _, tc := range []struct {
+		name   string
+		answer waitAnswer
+	}{{"a failed wait is cleared before its poll sleep", waitFailed}, {"exit 2 saves NoWaitUntil before its poll sleep", waitMissing}} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newClock()
+			w := newWaiter(tc.answer)
+			l := waitLink(t, c, w)
+			l.dirs[1].poll = time.Minute // the sleep lasts until the wake below
+			idleRound(l)
+			done := pauseIn(l)
+			<-w.started
+			var got state.Direction
+			waitFor(t, "the wait to be cleared", func() bool { got = savedInbound(t, l); return got.WaitingSince.IsZero() })
+			select {
+			case <-done:
+				t.Fatal("the pause ended before the poll sleep")
+			default:
+			}
+			want := time.Time{}
+			if tc.answer == waitMissing {
+				want = c.now().Add(WaitRetry)
+			}
+			if !got.NoWaitUntil.Equal(want) {
+				t.Fatalf("saved NoWaitUntil %v, want %v", got.NoWaitUntil, want)
+			}
+			l.wakeAll()
+			<-done
+			if tc.answer != waitMissing {
+				return
+			}
+			// The scheduler polls until that saved time.
+			idleRound(l)
+			c.add(WaitRetry - time.Second)
+			if l.mayWait(l.dirs[1]) {
+				t.Fatal("asked for relay wait again before NoWaitUntil")
+			}
+			c.add(time.Second)
+			if !l.mayWait(l.dirs[1]) {
+				t.Fatal("not asked again at NoWaitUntil")
+			}
+			// Asking again ends the mark, so status stops showing it.
+			w.mu.Lock()
+			w.block = true
+			w.mu.Unlock()
+			done = pauseIn(l)
+			<-w.started
+			if got := savedInbound(t, l); !got.NoWaitUntil.IsZero() || !got.WaitingSince.Equal(c.now()) {
+				t.Fatalf("asked again: saved %+v, want waiting since %v and no NoWaitUntil", got, c.now())
+			}
+			l.wakeAll()
+			<-done
+		})
+	}
+
+	t.Run("the scheduler reads the stored NoWaitUntil, and resume clears it", func(t *testing.T) {
+		c := newClock()
+		l := waitLink(t, c, newWaiter())
+		idleRound(l)
+		l.mu.Lock()
+		l.st.Inbound.NoWaitUntil = c.now().Add(time.Hour)
+		l.mu.Unlock()
+		if l.mayWait(l.dirs[1]) {
+			t.Fatal("a stored NoWaitUntil did not hold relay wait off")
+		}
+		l.Resume()
+		if got := savedInbound(t, l).NoWaitUntil; !got.IsZero() {
+			t.Fatalf("saved NoWaitUntil %v after a resume, want none", got)
+		}
+		idleRound(l)
+		if !l.mayWait(l.dirs[1]) {
+			t.Fatal("after a resume the direction does not ask for relay wait")
+		}
+	})
+
+	t.Run("Open clears both from a stored state", func(t *testing.T) {
+		const id = "0123456789abcdef0123456789abcdef"
+		dir := t.TempDir()
+		plan := filepath.Join(t.TempDir(), "plan.json")
+		if err := os.WriteFile(plan, []byte(`{"relay id":{"stdout":"`+id+`\n","skip_stdin":true}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("TESTPAGER_PLAN", plan)
+		at := newClock().now()
+		left := state.Direction{Class: "idle", LastContact: at, WaitingSince: at, NoWaitUntil: at.Add(WaitRetry)}
+		key := state.Key(id, "vm")
+		lock, err := state.TryLock(dir, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = state.Save(dir, key, state.Link{Outbound: left, Inbound: left})
+		lock.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		pager := testenv.TestPager(t)
+		l, err := Open(t.Context(), Options{
+			Name: "vm", Pager: config.Pager{Path: pager}, StateDir: dir,
+			Engine: round.Engine{Runner: pagercli.Runner{Timeout: time.Minute}},
+			Config: config.Link{Peer: "vm", RemotePeer: "laptop", PollOutbound: 5 * time.Second, PollInbound: 30 * time.Second,
+				Exec: &config.Exec{Argv: []string{pager}}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		l.mu.Lock()
+		st := l.st
+		l.mu.Unlock()
+		// status reads the file, so it must say the same as memory at once.
+		saved, err := state.Load(dir, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for name, d := range map[string]state.Direction{
+			"outbound": st.Outbound, "inbound": st.Inbound,
+			"saved outbound": saved.Outbound, "saved inbound": saved.Inbound,
+		} {
+			if !d.WaitingSince.IsZero() || !d.NoWaitUntil.IsZero() {
+				t.Errorf("%s after Open: waiting since %v, no wait until %v; want both cleared", name, d.WaitingSince, d.NoWaitUntil)
+			}
+			if d.Class != "idle" || !d.LastContact.Equal(at) {
+				t.Errorf("%s after Open lost the rest of its state: %+v", name, d)
+			}
+		}
+	})
 }
 
 // testPagerPlan is an exec endpoint running testpager with step as its
