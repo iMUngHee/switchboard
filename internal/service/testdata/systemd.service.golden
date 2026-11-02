@@ -1,0 +1,14 @@
+# Written by switchboard service install; reinstalling replaces it.
+[Unit]
+Description=switchboard: carries pager mail (100%% polling)
+
+[Service]
+Type=simple
+ExecStart="/home/me/.local/bin/switch board" "run" "--config" "/home/me/.config/switchboard/config.toml" "--note=say \"hi\" \\ $$HOME %%h"
+Restart=on-failure
+RestartSec=10s
+KillMode=mixed
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=default.target
