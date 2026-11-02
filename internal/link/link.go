@@ -260,6 +260,9 @@ func (l *Link) turn(stop, roundCtx context.Context, d *direction) (time.Duration
 	o := l.runRound(ctx, &e, d.round, in)
 
 	l.mu.Lock()
+	if s := l.farStore(d, o); s != "" {
+		l.st.LastRemoteStore = s
+	}
 	if o.Class == round.Stopped {
 		// Shutting down says nothing about the link: keep what it last was,
 		// and only the results still to ack.
@@ -287,6 +290,16 @@ func (l *Link) turn(stop, roundCtx context.Context, d *direction) (time.Duration
 		l.tell(seq, h)
 	}
 	return wait, o
+}
+
+// farStore is the far store's id as round o in direction d saw it, or "".
+// Outbound, the far side runs relay in and its results name it; inbound, it
+// runs relay out and its records do.
+func (l *Link) farStore(d *direction, o round.Outcome) string {
+	if d == l.dirs[1] { // inbound
+		return o.FromStore
+	}
+	return o.ToStore
 }
 
 // tell notifies a health change unless a later one was told first: the two

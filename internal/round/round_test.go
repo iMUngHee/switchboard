@@ -321,3 +321,39 @@ func TestStateWriteFailureStillAcks(t *testing.T) {
 		t.Fatalf("the failed write was not logged:\n%s", h.logs.String())
 	}
 }
+
+// TestOutcomeNamesTheFarStore: a round reports the store its records name as
+// their writer, which is the far store inbound, and the store the results
+// answering them name, which is the far store outbound. Lines that answer
+// nothing staged do not count, and lines that disagree name no store.
+func TestOutcomeNamesTheFarStore(t *testing.T) {
+	const other = "dddddddddddddddddddddddddddddddd"
+	stray := strings.Replace(res(9, "imported", ""), dstStore, other, 1) // answers no staged record
+	for _, tc := range []struct {
+		name     string
+		out, in  string
+		from, to string
+	}{
+		{"outbound: the far side's results name it", lines(rec(1), rec(2)),
+			lines(stray, res(1, "imported", ""), res(2, "deferred", `,"reason":"gap: expected 1, got 2"`)), srcStore, dstStore},
+		{"inbound: the far side's records name it, answered or not", lines(rec(1), rec(2)), lines(stray), srcStore, ""},
+		{"records that disagree name no writer", lines(rec(1), strings.Replace(rec(2), srcStore, other, 1)),
+			lines(res(1, "imported", "")), "", dstStore},
+		{"results that disagree name no receiver", lines(rec(1), rec(2)),
+			lines(res(1, "imported", ""), strings.Replace(res(2, "imported", ""), dstStore, other, 1)), srcStore, ""},
+		{"a deferral alone names the receiver", lines(rec(2)),
+			lines(res(2, "deferred", `,"reason":"gap: expected 1, got 2"`)), srcStore, dstStore},
+		{"what is not a store id names nothing", lines(strings.Replace(rec(1), srcStore, "aaaa", 2)),
+			lines(strings.Replace(strings.Replace(res(1, "imported", ""), srcStore, "aaaa", 1), dstStore, `\u001b]0;pwned\u0007`, 1)), "", ""},
+		{"an idle round names neither", "", "", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := fake(t, map[string]step{"relay out": {"stdout": tc.out}, "relay ack": {}})
+			dst := fake(t, map[string]step{"relay in": {"stdout": tc.in}})
+			o := newHarness().run(t, src, dst, Input{})
+			if o.FromStore != tc.from || o.ToStore != tc.to {
+				t.Fatalf("from %q to %q, want %q and %q (%+v)", o.FromStore, o.ToStore, tc.from, tc.to, o)
+			}
+		})
+	}
+}

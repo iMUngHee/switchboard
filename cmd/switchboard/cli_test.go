@@ -128,9 +128,16 @@ func TestCLIEndToEnd(t *testing.T) {
 	if out := mustCLI(t, "check", "--config", cfg); !strings.HasPrefix(out, "vm: ok (this store ") {
 		t.Fatalf("check: %q", out)
 	}
-	if st := status(t, cfg); st.Config != cfg || st.Links[0].Daemon || st.Links[0].Outbound.Class != "" || !st.Links[0].Stale {
+	// check stores nothing, so no store has been seen yet.
+	if st := status(t, cfg); st.Config != cfg || st.Links[0].Daemon || st.Links[0].Outbound.Class != "" || !st.Links[0].Stale ||
+		st.Links[0].LocalStore != "" || st.Links[0].RemoteStore != "" {
 		t.Fatalf("status before any round: %+v", st)
 	}
+	if out := mustCLI(t, "status", "--config", cfg); !strings.Contains(out, "vm: no daemon, stale (far store not seen yet)\n") {
+		t.Fatalf("status before any round: %q", out)
+	}
+	idA := strings.TrimSpace(string(s.Run(t, s.A, "relay", "id")))
+	idB := strings.TrimSpace(string(s.Run(t, s.B, "relay", "id")))
 
 	s.Run(t, s.A, "send", "kipa@vm", "from the laptop", "--session", "s-a")
 	s.Run(t, s.B, "send", "sape@laptop", "from the vm", "--session", "s-b")
@@ -149,11 +156,18 @@ func TestCLIEndToEnd(t *testing.T) {
 	if st.Outbound.Class != "ok" || st.Inbound.Class != "ok" || st.Outbound.LastSuccess == nil || st.Outbound.Pending != 0 || st.Daemon || st.Stale {
 		t.Fatalf("status after once: %+v", st)
 	}
+	if st.LocalStore != idA || st.RemoteStore != idB {
+		t.Fatalf("status after once names stores %q and %q, want %q and %q", st.LocalStore, st.RemoteStore, idA, idB)
+	}
 	var later statusOut
-	if err := json.Unmarshal([]byte(mustCLI(t, "status", "vm", "--json", "--config", cfg)), &later); err != nil || len(later.Links) != 1 {
+	raw := mustCLI(t, "status", "vm", "--json", "--config", cfg)
+	if err := json.Unmarshal([]byte(raw), &later); err != nil || len(later.Links) != 1 {
 		t.Fatalf("flags after the link: %v", err)
 	}
-	if out := mustCLI(t, "status", "--config", cfg); !strings.Contains(out, "vm: no daemon") || !strings.Contains(out, "outbound") {
+	if !strings.Contains(raw, `"local_store": "`+idA+`"`) || !strings.Contains(raw, `"remote_store": "`+idB+`"`) {
+		t.Fatalf("status --json does not name the stores local_store and remote_store:\n%s", raw)
+	}
+	if out := mustCLI(t, "status", "--config", cfg); !strings.Contains(out, "vm: no daemon (this store "+idA+", far store "+idB+")\n") || !strings.Contains(out, "outbound") {
 		t.Fatalf("status: %q", out)
 	}
 	if out := mustCLI(t, "resume", "--config", cfg, "vm"); !strings.Contains(out, "vm: cleared") {

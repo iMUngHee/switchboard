@@ -149,13 +149,15 @@ type directionStatus struct {
 }
 
 type linkStatus struct {
-	Name       string          `json:"name"`
-	Key        string          `json:"key"`
-	Daemon     bool            `json:"daemon"` // a running switchboard holds the link
-	Stale      bool            `json:"stale"`  // no daemon, and nothing heard for two poll intervals
-	NeedsHuman bool            `json:"needs_human"`
-	Outbound   directionStatus `json:"outbound"`
-	Inbound    directionStatus `json:"inbound"`
+	Name        string          `json:"name"`
+	Key         string          `json:"key"`
+	Daemon      bool            `json:"daemon"` // a running switchboard holds the link
+	Stale       bool            `json:"stale"`  // no daemon, and nothing heard for two poll intervals
+	NeedsHuman  bool            `json:"needs_human"`
+	LocalStore  string          `json:"local_store"`  // this store's id as the link's rounds last saw it; "" until one ran
+	RemoteStore string          `json:"remote_store"` // the far store's id, likewise; "" until a round carried something
+	Outbound    directionStatus `json:"outbound"`
+	Inbound     directionStatus `json:"inbound"`
 }
 
 // cmdStatus reports each link's stored state and whether a daemon holds it.
@@ -196,7 +198,8 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		heard := latest(st.Outbound.LastContact, st.Inbound.LastContact, st.Outbound.LastSuccess, st.Inbound.LastSuccess)
 		out = append(out, linkStatus{
 			Name: n, Key: key, Daemon: held, NeedsHuman: st.NeedsHuman,
-			Stale:    !held && (heard.IsZero() || now.Sub(heard) > 2*max(cfg.PollOutbound, cfg.PollInbound)),
+			Stale:      !held && (heard.IsZero() || now.Sub(heard) > 2*max(cfg.PollOutbound, cfg.PollInbound)),
+			LocalStore: st.LastLocalStore, RemoteStore: st.LastRemoteStore,
 			Outbound: dirStatus(st.Outbound), Inbound: dirStatus(st.Inbound),
 		})
 	}
@@ -220,6 +223,11 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		}
 		if l.Stale {
 			head += ", stale"
+		}
+		if l.RemoteStore != "" {
+			head += fmt.Sprintf(" (this store %s, far store %s)", l.LocalStore, l.RemoteStore)
+		} else {
+			head += " (far store not seen yet)"
 		}
 		if l.NeedsHuman {
 			head += fmt.Sprintf(", stopped: fix the cause, then run `switchboard resume %s`", l.Name)

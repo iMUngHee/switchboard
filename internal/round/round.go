@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -68,9 +69,15 @@ type Input struct {
 	PrevCode string   // the direction's last diagnostic code
 }
 
-// Outcome is what a round found. Every field is a count, a time or a fixed
-// string, except Pending, which holds result lines verbatim because relay ack
-// needs them as pager wrote them.
+// Outcome is what a round found. Every field is a count, a time, a store id
+// or a fixed string, except Pending, which holds result lines verbatim
+// because relay ack needs them as pager wrote them.
+//
+// FromStore and ToStore are the store ids the round saw at each side: the
+// writer its records name, and the receiver its results name. Which of them
+// is the far store depends on the direction, which only the caller knows.
+// Each is "" when nothing named it, or when two lines named different stores;
+// pager checks stores itself, so that should never happen.
 type Outcome struct {
 	Class     Class
 	Code      string
@@ -85,6 +92,8 @@ type Outcome struct {
 	Pending   []string  // results still to ack; the caller keeps them
 	Contact   bool      // a stage reached pager on the far side
 	StateErr  error     // storing results before ack failed; ack ran from memory
+	FromStore string    // link.store of the records relay out staged
+	ToStore   string    // store of the results that answer them
 }
 
 // Engine runs rounds.
@@ -140,6 +149,11 @@ func (e *Engine) Run(ctx context.Context, d Direction, in Input) Outcome {
 		v = verdict{Rerun, CodeCutOut, 0}
 	}
 	o.Records = len(recs)
+	writers := make([]string, len(recs))
+	for i, r := range recs {
+		writers[i] = r.key.store
+	}
+	o.FromStore = oneStore(writers)
 	if len(recs) == 0 && v.class == OK {
 		return e.done(d, o) // idle
 	}
@@ -155,6 +169,7 @@ func (e *Engine) Run(ctx context.Context, d Direction, in Input) Outcome {
 	rlines, rpartial := splitLines(res.Stdout)
 	c := correlate(recs, rlines)
 	o.Finals, o.Dropped = len(c.finals), c.dropped
+	o.ToStore = oneStore(c.receivers)
 	switch {
 	case !c.ok:
 		iv = verdict{NeedsHuman, CodeNotPager, iv.exit}
@@ -373,10 +388,11 @@ type deferral struct {
 }
 
 type correlation struct {
-	finals   []string // final results answering a staged record, verbatim
-	dropped  int      // results that answered nothing staged
-	deferral deferral // the first deferral, which stops the run
-	ok       bool     // every line was a result
+	finals    []string // final results answering a staged record, verbatim
+	receivers []string // the store each result answering a staged record names
+	dropped   int      // results that answered nothing staged
+	deferral  deferral // the first deferral, which stops the run
+	ok        bool     // every line was a result
 }
 
 // correlate keeps the results that answer a record staged this round. A
@@ -390,8 +406,9 @@ func correlate(recs []record, lines [][]byte) correlation {
 	c := correlation{ok: true}
 	for _, l := range lines {
 		var r struct {
-			Kind string `json:"kind"`
-			Link struct {
+			Kind  string `json:"kind"`
+			Store string `json:"store"` // the store that answered
+			Link  struct {
 				Store string `json:"store"`
 				ID    string `json:"id"`
 				Seq   int64  `json:"seq"`
@@ -409,6 +426,7 @@ func correlate(recs []record, lines [][]byte) correlation {
 			c.dropped++
 			continue
 		}
+		c.receivers = append(c.receivers, r.Store)
 		switch r.Status {
 		case "imported", "duplicate", "rejected":
 			c.finals = append(c.finals, string(l))
@@ -420,6 +438,25 @@ func correlate(recs []record, lines [][]byte) correlation {
 	}
 	return c
 }
+
+// oneStore returns the store id every one of ids is, or "" when there are
+// none or two differ.
+func oneStore(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	for _, id := range ids {
+		// The far side wrote these, and status prints them on a terminal:
+		// only what a store id can be is let through.
+		if id != ids[0] || !storeID.MatchString(id) {
+			return ""
+		}
+	}
+	return ids[0]
+}
+
+// storeID is the form pager gives a store's id.
+var storeID = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 func parseDeferral(reason string, retryAfterMS int64) deferral {
 	var exp, got int64

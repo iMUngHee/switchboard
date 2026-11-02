@@ -52,9 +52,10 @@ func TestOpenLocksTheLinkAndOnceCarriesMail(t *testing.T) {
 			t.Fatalf("direction %d: %+v", i, o)
 		}
 	}
+	idB := strings.TrimSpace(string(s.Run(t, s.B, "relay", "id")))
 	saved, err := state.Load(opt.StateDir, l.Key())
-	if err != nil || saved.Outbound.LastSuccess.IsZero() || saved.Inbound.LastSuccess.IsZero() || saved.LastLocalStore != idA {
-		t.Fatalf("stored %+v %v", saved, err)
+	if err != nil || saved.Outbound.LastSuccess.IsZero() || saved.Inbound.LastSuccess.IsZero() || saved.LastLocalStore != idA || saved.LastRemoteStore != idB {
+		t.Fatalf("stored %+v %v, want stores %s and %s", saved, err, idA, idB)
 	}
 	if !strings.Contains(string(s.Run(t, s.B, "export")), "over the link") || !strings.Contains(string(s.Run(t, s.A, "export")), "and back") {
 		t.Fatal("the mail did not arrive")
@@ -174,5 +175,28 @@ func TestFarEndpoint(t *testing.T) {
 	ep, err = FarEndpoint(config.Link{Exec: &config.Exec{Argv: []string{"docker", "exec", "-i", "box", "pager"}}}, "")
 	if _, ok := ep.(transport.ExecEndpoint); err != nil || !ok {
 		t.Fatalf("exec endpoint %+v %v", ep, err)
+	}
+}
+
+// TestRoundsRecordTheFarStore: the far store is the one outbound results and
+// inbound records name, a stopped round's included; a round that names none
+// keeps the one last seen, and every change is saved.
+func TestRoundsRecordTheFarStore(t *testing.T) {
+	near, far, later := strings.Repeat("a", 32), strings.Repeat("b", 32), strings.Repeat("d", 32)
+	l, _ := testLink(t, newClock(),
+		round.Outcome{Class: round.OK, FromStore: near, ToStore: far},
+		round.Outcome{Class: round.OK, FromStore: later, ToStore: near},
+		round.Outcome{Class: round.Idle},
+		round.Outcome{Class: round.Stopped, FromStore: near, ToStore: far},
+	)
+	for i, tc := range []struct {
+		dir  *direction
+		want string
+	}{{l.dirs[0], far}, {l.dirs[1], later}, {l.dirs[0], later}, {l.dirs[0], far}} {
+		l.step(t.Context(), tc.dir)
+		saved, err := state.Load(l.opt.StateDir, l.Key())
+		if err != nil || saved.LastRemoteStore != tc.want {
+			t.Fatalf("round %d (%s): stored far store %q, %v; want %q", i+1, tc.dir.name, saved.LastRemoteStore, err, tc.want)
+		}
 	}
 }
