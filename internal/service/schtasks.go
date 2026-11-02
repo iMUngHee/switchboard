@@ -206,3 +206,32 @@ func UninstallTask(name string) error {
 	_, err := schtasks("/Delete", "/TN", name, "/F")
 	return err
 }
+
+// TaskStatus reports whether the task is registered. A query for it by name
+// that succeeds says so; one that fails could mean either, since schtasks
+// says why only in the system's language, so the list of all tasks decides,
+// and an error listing them is an error rather than "not registered".
+// Whether its process runs is not read from schtasks, whose status column is
+// localized too; the link locks say whether a switchboard holds the links.
+func TaskStatus(name string) (Status, error) {
+	if _, err := schtasks("/Query", "/TN", name); err == nil {
+		return Status{Registered: true}, nil
+	}
+	out, err := schtasks("/Query", "/FO", "CSV", "/NH")
+	if err != nil {
+		return Status{}, err
+	}
+	return Status{Registered: taskListed(out, name)}, nil
+}
+
+// taskListed reports whether a `schtasks /Query /FO CSV /NH` listing holds
+// a task of this name in the root folder.
+func taskListed(csv, name string) bool {
+	want := `"\` + strings.ToLower(name) + `"`
+	for _, line := range strings.Split(csv, "\n") {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), want+",") {
+			return true
+		}
+	}
+	return false
+}

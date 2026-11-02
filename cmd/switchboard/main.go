@@ -25,6 +25,8 @@ commands:
   check    [--config FILE] [LINK…]          verify both stores enrolled each other
   status   [--config FILE] [--json] [LINK…] show each link's state
   resume   [--config FILE] LINK             clear a stopped link and run it again
+  service  install|uninstall|status [--config FILE] [--exe FILE] [--print]
+                                            run switchboard at logon as this user
   version                                   print the version
 
 Every command reports the configuration file it read.
@@ -47,6 +49,8 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 		return cmdStatus(rest, stdout, stderr)
 	case "resume":
 		return cmdResume(rest, stdout, stderr)
+	case "service":
+		return cmdService(rest, stdout, stderr)
 	case "version", "--version":
 		fmt.Fprintln(stdout, "switchboard", version)
 		return 0

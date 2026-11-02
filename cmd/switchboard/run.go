@@ -26,12 +26,13 @@ func cmdRun(args []string, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	cfgFlag := fs.String("config", "", "configuration file")
 	grace := fs.Duration("shutdown-grace", link.DefaultGrace, "how long running rounds may finish once stopping; 0 stops them at once")
+	logPath := fs.String("log", "", "write the log to this file, moved aside at 10 MiB with 3 files kept, instead of stderr")
 	pos, code, ok := flags(fs, args)
 	if !ok {
 		return code
 	}
 	if len(pos) > 0 || *grace < 0 {
-		fmt.Fprintln(stderr, "usage: switchboard run [--config FILE] [--shutdown-grace DURATION]")
+		fmt.Fprintln(stderr, "usage: switchboard run [--config FILE] [--shutdown-grace DURATION] [--log FILE]")
 		return 2
 	}
 	// On Windows the daemon puts itself in a job first, so no stage it
@@ -49,7 +50,16 @@ func cmdRun(args []string, stderr io.Writer) int {
 		return fail(stderr, fmt.Errorf("%s configures no links", a.cfgPath))
 	}
 
-	log := slog.New(slog.NewTextHandler(stderr, nil))
+	var out io.Writer = stderr
+	if *logPath != "" {
+		lf, err := openLog(*logPath)
+		if err != nil {
+			return fail(stderr, err)
+		}
+		defer lf.Close()
+		out = lf
+	}
+	log := slog.New(slog.NewTextHandler(out, nil))
 	signals, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 	ctx, cancel := context.WithCancel(signals)

@@ -77,3 +77,17 @@ func TestQuoteWindowsArg(t *testing.T) {
 		}
 	}
 }
+
+// TestTaskListed: the task is found in schtasks' CSV listing by its name in
+// the root folder, whatever the case, and not by a longer or nested name.
+func TestTaskListed(t *testing.T) {
+	list := "\"\\Microsoft\\Windows\\Defrag\\ScheduledDefrag\",\"N/A\",\"Ready\"\r\n" +
+		"\"\\Switchboard\",\"N/A\",\"Running\"\r\n" +
+		"\"\\switchboard-spike\",\"N/A\",\"Ready\"\r\n"
+	if !taskListed(list, "switchboard") {
+		t.Error("the task was not found")
+	}
+	if taskListed(list, "spike") || taskListed(list, "ScheduledDefrag") || taskListed("", "switchboard") {
+		t.Error("a task was found that is not there")
+	}
+}

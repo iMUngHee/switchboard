@@ -29,6 +29,20 @@ jobs:
         run: make fmt-check
       - run: go vet ./...
       - run: go test -race -count=1 ./...
+      # The plan's criterion rows for this system must pass here, every part
+      # of them: a skipped subtest would pass the line above unseen.
+      - name: criterion tests run, not skip
+        shell: bash
+        run: |
+          set -eu
+          tests="TestCLIEndToEnd TestGracefulShutdownDuringRound"
+          if [ "$RUNNER_OS" = Windows ]; then tests="TestCLIEndToEnd TestForcedEndDuringRound"; fi
+          for t in $tests; do
+            out=$(go test ./cmd/switchboard -run "^$t\$" -count=1 -v) || { echo "$out"; exit 1; }
+            echo "$out" | grep -E -- '--- (PASS|SKIP|FAIL)'
+            echo "$out" | grep -q "^--- PASS: $t " || { echo "::error::$t did not pass"; exit 1; }
+            if echo "$out" | grep -q -- '--- SKIP'; then echo "::error::$t skipped a part"; exit 1; fi
+          done
       # No private pattern file exists in CI, so this checks the generic rules.
       - run: go run ./tools/hygiene
 
@@ -93,6 +107,41 @@ jobs:
       - name: sshd log
         if: failure()
         run: sudo cat "$RUNNER_TEMP/sshd/sshd.log"
+
+  # The real service, installed as the runner's user: it must carry mail,
+  # hold its link, and leave nothing behind when uninstalled.
+  service-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: a user systemd
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          sudo loginctl enable-linger "$USER"
+          uid=$(id -u)
+          for _ in $(seq 30); do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
+          [ -S "/run/user/$uid/bus" ] || echo "::warning::no user bus came up; the Linux smoke test will skip"
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
+      # Linux may lack a user systemd and skip; Windows always has Task
+      # Scheduler, so a skip there is a failure.
+      - name: install, carry, uninstall
+        shell: bash
+        env:
+          SWITCHBOARD_SERVICE_SMOKE: "1"
+        run: |
+          set -o pipefail
+          go test -tags smoke -count=1 -v -run '^TestServiceSmoke$' ./cmd/switchboard 2>&1 | tee smoke.log
+          if [ "$RUNNER_OS" = Windows ] && grep -q -- '--- SKIP' smoke.log; then echo "::error::the smoke test skipped"; exit 1; fi
 
   # Plan step 4: can a console-less switchboard run as a Task Scheduler task
   # for the runner's user, stay up, and start console children without opening
