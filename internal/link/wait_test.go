@@ -79,6 +79,15 @@ func waitLink(t *testing.T, c *clock, w *waiter, outcomes ...round.Outcome) *Lin
 	return l
 }
 
+// noSleep makes a poll sleep impossible to miss: a pause that should not
+// sleep is checked against half of it, so a slow state write (a wait's start
+// is saved; Windows runners under -race can take hundreds of milliseconds)
+// cannot pass for one.
+func noSleep(l *Link) *Link {
+	l.dirs[1].poll = 5 * time.Second
+	return l
+}
+
 // timedPause runs one pause of the inbound direction and says how long it
 // took.
 func timedPause(t *testing.T, l *Link) time.Duration {
@@ -102,9 +111,9 @@ func TestWaitReplacesTheIdlePoll(t *testing.T) {
 	t.Run("after a round that left nothing to carry", func(t *testing.T) {
 		for name, o := range map[string]round.Outcome{"idle": idle, "carried everything": carried} {
 			w := newWaiter(waitReady)
-			l := waitLink(t, newClock(), w)
+			l := noSleep(waitLink(t, newClock(), w))
 			in(l, o)
-			if took := timedPause(t, l); took >= l.dirs[1].poll {
+			if took := timedPause(t, l); took >= l.dirs[1].poll/2 {
 				t.Errorf("%s: the pause took %v, a poll sleep; want an answer from relay wait", name, took)
 			}
 			if calls, _ := w.count(); calls != 1 {
@@ -116,7 +125,7 @@ func TestWaitReplacesTheIdlePoll(t *testing.T) {
 	t.Run("timeout runs a round too", func(t *testing.T) {
 		w := newWaiter(waitTimeout)
 		w.delay = 60 * time.Millisecond // past half the 100ms asked for
-		l := waitLink(t, newClock(), w)
+		l := noSleep(waitLink(t, newClock(), w))
 		in(l, idle)
 		if took := timedPause(t, l); took >= w.delay+l.dirs[1].poll/2 {
 			t.Errorf("the pause took %v after a timeout answer", took)
@@ -135,7 +144,7 @@ func TestWaitReplacesTheIdlePoll(t *testing.T) {
 	t.Run("a timeout across a machine's sleep is an answer", func(t *testing.T) {
 		// The monotonic clock stopped while the machine slept, so only the
 		// wall clock shows the wait lasted.
-		l := waitLink(t, newClock(), newWaiter())
+		l := noSleep(waitLink(t, newClock(), newWaiter()))
 		in(l, idle)
 		base := l.now()
 		var slept atomic.Bool
@@ -146,7 +155,7 @@ func TestWaitReplacesTheIdlePoll(t *testing.T) {
 			return base
 		}
 		l.runWait = func(context.Context, *direction) waitAnswer { slept.Store(true); return waitTimeout }
-		if took := timedPause(t, l); took >= l.dirs[1].poll {
+		if took := timedPause(t, l); took >= l.dirs[1].poll/2 {
 			t.Errorf("a timeout after the machine slept was taken as early: the pause took %v", took)
 		}
 	})
