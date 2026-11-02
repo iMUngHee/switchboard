@@ -16,7 +16,15 @@ func prepare(cmd *exec.Cmd) *tree {
 	return &tree{cmd: cmd}
 }
 
-func (t *tree) start() error { return t.cmd.Start() }
+func (t *tree) start() error {
+	if err := t.cmd.Start(); err != nil {
+		return err
+	}
+	if AfterCreate != nil {
+		AfterCreate()
+	}
+	return nil
+}
 
 // stop sends SIGTERM to the group, waits up to grace for the stage to exit,
 // then SIGKILLs the group. Whatever is left of the group is killed either way,

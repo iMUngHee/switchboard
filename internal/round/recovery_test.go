@@ -43,7 +43,7 @@ func TestRecoveryBoundary(t *testing.T) {
 	t.Run("killed before the state write: recovered by resend", func(t *testing.T) {
 		s, d := setup(t)
 		h := newHarness()
-		h.e.crash = func(point string) bool { return point == "before-save" }
+		h.e.Crash = func(point string) bool { return point == "before-save" }
 		h.e.Run(t.Context(), d, Input{})
 		if len(h.saves) != 0 || pending(t, s) != 1 {
 			t.Fatalf("saves %d, pending %d: the crash came too late", len(h.saves), pending(t, s))
@@ -60,7 +60,7 @@ func TestRecoveryBoundary(t *testing.T) {
 	t.Run("killed after the state write: the stored results are acked first", func(t *testing.T) {
 		s, d := setup(t)
 		h := newHarness()
-		h.e.crash = func(point string) bool { return point == "after-save" }
+		h.e.Crash = func(point string) bool { return point == "after-save" }
 		h.e.Run(t.Context(), d, Input{})
 		if len(h.saves) != 1 || len(h.saves[0]) != 1 || pending(t, s) != 1 {
 			t.Fatalf("saves %q, pending %d", h.saves, pending(t, s))

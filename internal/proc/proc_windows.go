@@ -42,6 +42,9 @@ func (t *tree) start() error {
 		windows.CloseHandle(job)
 		return err
 	}
+	if AfterCreate != nil {
+		AfterCreate()
+	}
 	fail := func(err error) error {
 		_ = t.cmd.Process.Kill()
 		_ = t.cmd.Wait()

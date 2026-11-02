@@ -393,6 +393,11 @@ func FarEndpoint(cfg config.Link, sshPath string) (transport.Endpoint, error) {
 	return ep, ep.Validate()
 }
 
+// LocalStoreID returns this store's id, from `relay id` on the local pager.
+func LocalStoreID(ctx context.Context, r pagercli.Runner, p config.Pager) (string, error) {
+	return relayID(ctx, r, transport.LocalEndpoint{Pager: p.Path, DB: p.DB})
+}
+
 func relayID(ctx context.Context, r pagercli.Runner, ep transport.Endpoint) (string, error) {
 	out, err := r.Run(ctx, ep, nil, "relay", "id")
 	if err != nil {

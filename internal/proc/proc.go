@@ -27,6 +27,11 @@ import (
 	"time"
 )
 
+// AfterCreate, when set, runs right after a stage's process is created and,
+// on Windows, before it is placed in its own job and resumed. It is a seam for
+// the tests that end switchboard at that moment; nothing else sets it.
+var AfterCreate func()
+
 // DefaultGrace is how long a stage gets between SIGTERM and SIGKILL.
 const DefaultGrace = 3 * time.Second
 

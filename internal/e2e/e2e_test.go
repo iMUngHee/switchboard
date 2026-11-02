@@ -1,9 +1,9 @@
 //go:build e2e
 
 // Package e2e carries real mail both ways between two real pager stores
-// through the round engine. CI runs it on every system with the far store
-// behind an exec endpoint, and on Linux once more through ssh to a localhost
-// sshd:
+// with the switchboard command itself. CI runs it on every system with the
+// far store behind an exec endpoint, and on Linux once more through the ssh
+// preset to a localhost sshd:
 //
 //	go test -tags e2e ./internal/e2e
 //
@@ -14,16 +14,16 @@
 package e2e
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/iMUngHee/switchboard/internal/pagercli"
-	"github.com/iMUngHee/switchboard/internal/round"
 	"github.com/iMUngHee/switchboard/internal/testenv"
-	"github.com/iMUngHee/switchboard/internal/transport"
 )
 
 func TestRoundTripBothWays(t *testing.T) {
@@ -31,19 +31,36 @@ func TestRoundTripBothWays(t *testing.T) {
 	if (port == "") != (farDB == "") {
 		t.Fatal("set both SWITCHBOARD_E2E_SSH_PORT and SWITCHBOARD_E2E_FAR_DB, or neither")
 	}
+	bin := build(t)
 	s := testenv.NewStoresAt(t, farDB)
-	far := transport.Endpoint(s.Far)
+
+	lit := func(v string) string { return "'" + v + "'" }
+	far := fmt.Sprintf("[link.vm.exec]\nargv = [%s]\nenv = { PAGER_DB = %s }\n", lit(s.Pager), lit(s.B))
 	if port != "" {
 		known := filepath.Join(t.TempDir(), "known_hosts")
-		far = transport.SSHEndpoint{
-			SSH:   "/usr/bin/ssh",
-			Host:  "127.0.0.1",
-			Pager: s.Pager,
-			Options: []string{"-p", port, "-i", os.Getenv("SWITCHBOARD_E2E_SSH_KEY"),
-				"-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=" + known},
+		far = fmt.Sprintf("[link.vm.ssh]\nhost = '127.0.0.1'\npager = %s\noptions = ['-p', %s, '-i', %s, '-o', 'StrictHostKeyChecking=accept-new', '-o', %s]\n",
+			lit(s.Pager), lit(port), lit(os.Getenv("SWITCHBOARD_E2E_SSH_KEY")), lit("UserKnownHostsFile="+known))
+	}
+	cfg := filepath.Join(t.TempDir(), "config.toml")
+	text := fmt.Sprintf("version = 1\n\n[pager]\npath = %s\ndb = %s\n\n[link.vm]\nremote_peer = 'laptop'\n\n%s", lit(s.Pager), lit(s.A), far)
+	if err := os.WriteFile(cfg, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := sandbox(t)
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command(bin, args...)
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("switchboard %s: %v\n%s", strings.Join(args, " "), err, out)
 		}
+		return string(out)
 	}
 
+	if out := run("check", "--config", cfg); !strings.Contains(out, "vm: ok") {
+		t.Fatalf("check:\n%s", out)
+	}
 	const toFar, toNear = "laptop to vm, once", "vm to laptop, once"
 	s.Run(t, s.A, "send", "kipa@vm", toFar, "--session", "s-a")
 	s.Run(t, s.B, "send", "sape@laptop", toNear, "--session", "s-b")
@@ -51,20 +68,12 @@ func TestRoundTripBothWays(t *testing.T) {
 		t.Fatalf("pending before: laptop %d, vm %d; want 1 each", a, b)
 	}
 
-	e := &round.Engine{Runner: pagercli.Runner{Timeout: time.Minute}}
-	for _, d := range []round.Direction{
-		{Link: "vm", Name: "outbound", From: round.Side{Endpoint: s.Local, Peer: "vm"}, To: round.Side{Endpoint: far, Peer: "laptop"}},
-		{Link: "vm", Name: "inbound", From: round.Side{Endpoint: far, Peer: "laptop"}, To: round.Side{Endpoint: s.Local, Peer: "vm"}},
-	} {
-		o := e.Run(t.Context(), d, round.Input{})
-		if o.Class != round.OK || o.Records != 1 || o.Finals != 1 || len(o.Pending) != 0 {
-			t.Fatalf("%s: %+v", d.Name, o)
-		}
-		if _, isSSH := far.(transport.SSHEndpoint); isSSH && !o.Contact {
-			t.Fatalf("%s: no stage reached the far pager", d.Name)
+	out := run("once", "--config", cfg)
+	for _, want := range []string{"vm outbound: ok, 1 records, 1 with a final result", "vm inbound: ok, 1 records, 1 with a final result"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("once lacks %q:\n%s", want, out)
 		}
 	}
-
 	if a, b := pending(t, s, s.A), pending(t, s, s.B); a != 0 || b != 0 {
 		t.Fatalf("pending after: laptop %d, vm %d; want 0 each", a, b)
 	}
@@ -73,6 +82,32 @@ func TestRoundTripBothWays(t *testing.T) {
 			t.Fatalf("%s holds %q %d times, want once", filepath.Base(c.db), c.body, n)
 		}
 	}
+}
+
+// build compiles switchboard for this test.
+func build(t *testing.T) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "switchboard")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	if out, err := exec.Command("go", "build", "-o", bin, "github.com/iMUngHee/switchboard/cmd/switchboard").CombinedOutput(); err != nil {
+		t.Fatalf("build switchboard: %v\n%s", err, out)
+	}
+	return bin
+}
+
+// sandbox is the environment for switchboard: every per-user location in a
+// temporary directory, so it reads no real configuration and keeps its
+// state there.
+func sandbox(t *testing.T) []string {
+	t.Helper()
+	home := t.TempDir()
+	return append(os.Environ(),
+		"HOME="+home, "USERPROFILE="+home,
+		"XDG_CONFIG_HOME="+filepath.Join(home, "config"), "XDG_STATE_HOME="+filepath.Join(home, "state"),
+		"APPDATA="+filepath.Join(home, "AppData", "Roaming"), "LOCALAPPDATA="+filepath.Join(home, "AppData", "Local"),
+		"SWITCHBOARD_CONFIG=")
 }
 
 func pending(t *testing.T, s *testenv.Stores, db string) int {

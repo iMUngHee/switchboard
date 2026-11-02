@@ -5,7 +5,7 @@
 //
 // TESTPAGER_PLAN names the plan file: an object keyed by the first two
 // arguments ("relay out", "relay in", "peer ls", …). TESTPAGER_LOG, when set,
-// receives one JSON line per invocation with its arguments and stdin.
+// receives one JSON line per invocation with its arguments, stdin and pid.
 package main
 
 import (
@@ -61,7 +61,7 @@ func main() {
 	if log := os.Getenv("TESTPAGER_LOG"); log != "" {
 		f, err := os.OpenFile(log, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err == nil {
-			_ = json.NewEncoder(f).Encode(map[string]any{"args": os.Args[1:], "stdin": string(stdin)})
+			_ = json.NewEncoder(f).Encode(map[string]any{"args": os.Args[1:], "stdin": string(stdin), "pid": os.Getpid()})
 			f.Close()
 		}
 	}

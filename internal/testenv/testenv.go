@@ -4,6 +4,9 @@
 package testenv
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -66,19 +69,46 @@ func Pager(t testing.TB) string {
 }
 
 // TestPager returns the path of the fake pager built from internal/testpager.
+// It is kept in the per-user cache under a hash of its source, so every test
+// process reuses one build until the source changes.
 func TestPager(t testing.TB) string {
 	t.Helper()
 	fakeOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "switchboard-testpager-")
+		_, here, _, _ := runtime.Caller(0)
+		src, err := os.ReadFile(filepath.Join(filepath.Dir(here), "..", "testpager", "main.go"))
 		if err != nil {
 			fakeErr = err
 			return
 		}
+		cache, err := os.UserCacheDir()
+		if err != nil {
+			fakeErr = err
+			return
+		}
+		sum := sha256.Sum256(src)
+		dir := filepath.Join(cache, "switchboard-test", "testpager-"+hex.EncodeToString(sum[:6]))
 		fakePath = filepath.Join(dir, exe("testpager"))
-		cmd := exec.Command("go", "build", "-o", fakePath, "github.com/iMUngHee/switchboard/internal/testpager")
+		if _, err := os.Stat(fakePath); err == nil {
+			return
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			fakeErr = err
+			return
+		}
+		// Built under a name of its own, then renamed: test processes for
+		// several packages may build it at once.
+		tmp := filepath.Join(dir, fmt.Sprintf("build-%d-%s", os.Getpid(), exe("testpager")))
+		cmd := exec.Command("go", "build", "-o", tmp, "github.com/iMUngHee/switchboard/internal/testpager")
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			fakeErr = &buildError{what: "testpager", err: err, out: out}
+			return
+		}
+		if err := os.Rename(tmp, fakePath); err != nil {
+			if _, statErr := os.Stat(fakePath); statErr != nil {
+				fakeErr = err
+			}
+			os.Remove(tmp)
 		}
 	})
 	if fakeErr != nil {

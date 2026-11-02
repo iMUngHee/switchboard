@@ -99,9 +99,10 @@ type Engine struct {
 	// sets it, to the terminal that asked; nothing else ever sees stderr.
 	Debug io.Writer
 
-	// crash, set by tests, ends Run at a named point as if the process had
-	// died there.
-	crash func(point string) bool
+	// Crash, set only by tests, is called at named points of a round
+	// ("before-save", "after-save"). Returning true ends Run there, as if the
+	// process had died; a test binary may also really end the process.
+	Crash func(point string) bool
 }
 
 // Run runs one round in direction d.
@@ -276,7 +277,7 @@ func (e *Engine) done(d Direction, o Outcome) Outcome {
 	return o
 }
 
-func (e *Engine) crashed(point string) bool { return e.crash != nil && e.crash(point) }
+func (e *Engine) crashed(point string) bool { return e.Crash != nil && e.Crash(point) }
 
 func (e *Engine) now() time.Time {
 	if e.Now != nil {
