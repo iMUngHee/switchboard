@@ -52,7 +52,8 @@ func sandbox(t *testing.T) []string {
 
 // writeConfig writes a configuration with one link, vm, whose far side is
 // reached by running farArgv with farEnv. Strings are TOML literal strings,
-// so Windows paths need no escaping.
+// so Windows paths need no escaping. Notifications go to testpager, so no
+// test ever shows a real desktop notification.
 func writeConfig(t *testing.T, pager, db string, farArgv []string, farEnv map[string]string) string {
 	t.Helper()
 	lit := func(s string) string { return "'" + s + "'" }
@@ -63,8 +64,8 @@ func writeConfig(t *testing.T, pager, db string, farArgv []string, farEnv map[st
 	for k, v := range farEnv {
 		env = append(env, k+" = "+lit(v))
 	}
-	text := fmt.Sprintf("version = 1\n\n[pager]\npath = %s\ndb = %s\n\n[link.vm]\nremote_peer = 'laptop'\npoll_outbound = '1s'\npoll_inbound = '5s'\n\n[link.vm.exec]\nargv = [%s]\nenv = { %s }\n",
-		lit(pager), lit(db), strings.Join(argv, ", "), strings.Join(env, ", "))
+	text := fmt.Sprintf("version = 1\n\n[pager]\npath = %s\ndb = %s\n\n[notify]\ncommand = [%s, 'notify', '{link}', '{state}']\n\n[link.vm]\nremote_peer = 'laptop'\npoll_outbound = '1s'\npoll_inbound = '5s'\n\n[link.vm.exec]\nargv = [%s]\nenv = { %s }\n",
+		lit(pager), lit(db), lit(testenv.TestPager(t)), strings.Join(argv, ", "), strings.Join(env, ", "))
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 		t.Fatal(err)

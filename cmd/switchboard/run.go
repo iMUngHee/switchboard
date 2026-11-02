@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/iMUngHee/switchboard/internal/link"
+	"github.com/iMUngHee/switchboard/internal/notify"
 	"github.com/iMUngHee/switchboard/internal/proc"
 )
 
@@ -55,12 +56,14 @@ func cmdRun(args []string, stderr io.Writer) int {
 	defer cancel()
 
 	sem := make(chan struct{}, maxRounds)
+	notifier := notify.New(a.cfg.Notify.Command, log)
+	defer notifier.Close() // after every link has stopped: it sends what is queued
 	e := a.engine(log, nil)
 	g := max(*grace, time.Nanosecond) // the link reads zero as its default
 	var wg sync.WaitGroup
 	for _, n := range names {
 		opt := a.options(n, e, log)
-		opt.Sem, opt.Grace, opt.Notifier = sem, g, logNotifier{log}
+		opt.Sem, opt.Grace, opt.Notifier = sem, g, notifier
 		l, err := link.Open(ctx, opt)
 		switch {
 		case errors.Is(err, link.ErrDriven):
@@ -121,12 +124,4 @@ func waitOpen(ctx context.Context, opt link.Options) *link.Link {
 		}
 		wait = min(2*wait, 30*time.Second)
 	}
-}
-
-// logNotifier writes what a person should be told to the log. The notify
-// sinks replace it.
-type logNotifier struct{ log *slog.Logger }
-
-func (n logNotifier) Notify(name string, h link.Health, hint string) {
-	n.log.Warn("notify", "link", name, "health", string(h), "hint", hint)
 }
