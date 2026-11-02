@@ -197,8 +197,8 @@ jobs:
           if (Test-Path $log) { Get-Content $log -Tail 40 }
           exit 0
 
-  # Pure-Go release builds for every target, including the console-less
-  # Windows daemon.
+  # The release archives a tag would publish, built and checked on every push:
+  # every target, every file, the notices, the checksums and the version.
   dist:
     runs-on: ubuntu-latest
     steps:
@@ -206,4 +206,26 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: make dist
+      - run: make release VERSION=v0.0.0-ci
+      - name: check the archives
+        run: |
+          set -eu
+          cd dist
+          ls -l
+          [ "$(ls *.tar.gz *.zip | wc -l)" -eq 6 ] || { echo "::error::want 6 archives"; exit 1; }
+          [ "$(wc -l < SHA256SUMS)" -eq 6 ] || { echo "::error::SHA256SUMS must list all 6"; exit 1; }
+          sha256sum -c SHA256SUMS
+          for a in *.tar.gz *.zip; do
+            case "$a" in
+              *.zip) n=${a%.zip}; list=$(unzip -Z1 "$a"); want="switchboard.exe switchboardw.exe" ;;
+              *) n=${a%.tar.gz}; list=$(tar -tzf "$a"); want="switchboard" ;;
+            esac
+            for f in $want LICENSE README.md THIRD_PARTY_NOTICES; do
+              echo "$list" | grep -qFx "$n/$f" || { echo "::error::$a lacks $f"; exit 1; }
+            done
+          done
+          tar -xzf switchboard-v0.0.0-ci-linux-amd64.tar.gz
+          ./switchboard-v0.0.0-ci-linux-amd64/switchboard version | grep -qx 'switchboard v0.0.0-ci'
+          for c in "Go (runtime and standard library)" "golang.org/x/sys" "github.com/pelletier/go-toml/v2"; do
+            grep -qF "$c" switchboard-v0.0.0-ci-linux-amd64/THIRD_PARTY_NOTICES || { echo "::error::the notices lack $c"; exit 1; }
+          done

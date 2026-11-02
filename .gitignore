@@ -1,5 +1,5 @@
 # Compiled binaries: a bare `go build ./cmd/switchboard` drops one here, and
-# `make dist` fills dist/.
+# `make release` fills dist/.
 /switchboard
 /dist/
 *.exe
