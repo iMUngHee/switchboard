@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -98,7 +99,12 @@ func (a *app) definition(exe string) (definition, error) {
 		text, err := service.UnitFile(u)
 		return definition{exe, text, func() error { return service.InstallUnit(u) }}, err
 	case "windows":
-		t := service.Task{Name: serviceName, Description: description, Exe: exe, Args: append(args, "--log", logPath), WorkDir: a.stateDir}
+		// The task is this user's, at this user's logon.
+		u, err := user.Current()
+		if err != nil {
+			return definition{}, err
+		}
+		t := service.Task{Name: serviceName, Description: description, UserID: u.Username, Exe: exe, Args: append(args, "--log", logPath), WorkDir: a.stateDir}
 		text, err := service.TaskXML(t)
 		return definition{exe, text, func() error { return service.InstallTask(t) }}, err
 	}

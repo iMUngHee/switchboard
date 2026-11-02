@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -35,6 +36,13 @@ func TestServiceInstallPrints(t *testing.T) {
 	}
 	stateDir, _ := paths.StateDir()
 	want := []string{exe, "run", "--config", cfg}
+	if runtime.GOOS == "windows" {
+		u, err := user.Current()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, "<UserId>"+u.Username+"</UserId>") // the task is this user's
+	}
 	if runtime.GOOS != "linux" { // systemd keeps the log in the journal
 		want = append(want, "--log", filepath.Join(stateDir, "switchboard.log"))
 	}
