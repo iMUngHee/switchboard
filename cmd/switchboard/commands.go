@@ -138,6 +138,56 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 	return code
 }
 
+// cmdEnroll pairs the two stores of each link over the link, where they are
+// not already, then checks the result.
+func cmdEnroll(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("enroll", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	cfgFlag := fs.String("config", "", "configuration file")
+	pos, code, ok := flags(fs, args)
+	if !ok {
+		return code
+	}
+	a, err := load(*cfgFlag, stderr)
+	if err != nil {
+		return fail(stderr, err)
+	}
+	names, err := a.links(pos)
+	if err != nil {
+		return fail(stderr, err)
+	}
+	for _, n := range names {
+		cfg := a.cfg.Links[n]
+		far, err := link.FarEndpoint(cfg, "")
+		if err != nil {
+			code = fail(stderr, fmt.Errorf("link %s: %w", n, err))
+			continue
+		}
+		res := link.Enroll(context.Background(), a.runner(), a.local(), far, cfg.Peer, cfg.RemotePeer)
+		switch res.Here {
+		case link.Added:
+			fmt.Fprintf(stdout, "%s: this store enrolled the far store as %q (store %s)\n", n, cfg.Peer, res.RemoteStore)
+		case link.Already:
+			fmt.Fprintf(stdout, "%s: this store already enrolled the far store as %q\n", n, cfg.Peer)
+		}
+		switch res.There {
+		case link.Added:
+			fmt.Fprintf(stdout, "%s: the far store enrolled this store as %q (store %s)\n", n, cfg.RemotePeer, res.LocalStore)
+		case link.Already:
+			fmt.Fprintf(stdout, "%s: the far store already enrolled this store as %q\n", n, cfg.RemotePeer)
+		}
+		if res.OK() {
+			fmt.Fprintf(stdout, "%s: ok (this store %s, far store %s)\n", n, res.LocalStore, res.RemoteStore)
+			continue
+		}
+		code = 1
+		for _, p := range res.Problems {
+			fmt.Fprintf(stdout, "%s: %s\n", n, p)
+		}
+	}
+	return code
+}
+
 type directionStatus struct {
 	Class       string     `json:"class"`
 	Code        string     `json:"code,omitempty"`

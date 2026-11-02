@@ -46,7 +46,7 @@ func TestDocsMatchCLI(t *testing.T) {
 		flagsOf[cmd] = f
 		return f
 	}
-	commands := map[string]bool{"run": true, "once": true, "check": true, "status": true, "resume": true, "service": true, "version": true}
+	commands := map[string]bool{"run": true, "once": true, "check": true, "enroll": true, "status": true, "resume": true, "service": true, "version": true}
 	services := map[string]bool{"install": true, "uninstall": true, "status": true}
 
 	var invocations, configs int

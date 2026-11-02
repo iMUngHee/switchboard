@@ -38,6 +38,10 @@ laptop$ pager peer add vm --store <the vm's id>
 vm$     pager peer add laptop --store <the laptop's id>
 ```
 
+Or, once the link is configured (below), let switchboard do all four over it:
+`switchboard enroll` adds whichever side is missing, can be run again if it
+stops halfway, and never changes a name already enrolled as another store.
+
 ## Configure
 
 `~/.config/switchboard/config.toml` (on Windows `%AppData%\switchboard\config.toml`):
@@ -61,6 +65,7 @@ Every key is described in [docs/configuration.md](docs/configuration.md).
 ## Run
 
 ```sh
+switchboard enroll           # enroll both stores with each other, if not yet
 switchboard check            # both stores enrolled each other, and ssh works
 switchboard once             # one round each way, now
 switchboard service install  # run at logon, as you

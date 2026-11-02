@@ -23,6 +23,7 @@ commands:
   run      [--config FILE]                 carry mail on every link until stopped
   once     [--config FILE] [--debug] [LINK…] run one round each way now
   check    [--config FILE] [LINK…]          verify both stores enrolled each other
+  enroll   [--config FILE] [LINK…]          enroll both stores with each other where missing
   status   [--config FILE] [--json] [LINK…] show each link's state
   resume   [--config FILE] LINK             clear a stopped link and run it again
   service  install|uninstall|status [--config FILE] [--exe FILE] [--print]
@@ -45,6 +46,8 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 		return cmdOnce(rest, stdout, stderr)
 	case "check":
 		return cmdCheck(rest, stdout, stderr)
+	case "enroll":
+		return cmdEnroll(rest, stdout, stderr)
 	case "status":
 		return cmdStatus(rest, stdout, stderr)
 	case "resume":

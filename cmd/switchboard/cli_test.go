@@ -245,6 +245,54 @@ func TestCLIEndToEnd(t *testing.T) {
 	})
 }
 
+// TestCLIEnroll: enroll pairs two fresh stores over the link and says so per
+// side, says "already" when run again, and refuses, with exit 1, a name
+// enrolled as another store.
+func TestCLIEnroll(t *testing.T) {
+	sandbox(t)
+	t.Setenv("PAGER_WAKE", "off")
+	t.Setenv("PAGER_CLIENT", "none")
+	pager := testenv.Pager(t)
+	run := func(db string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command(pager, args...)
+		cmd.Env = append(os.Environ(), "PAGER_DB="+db)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("pager %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a.db"), filepath.Join(dir, "b.db")
+	idA, idB := run(a, "relay", "id"), run(b, "relay", "id")
+	cfg := writeConfig(t, pager, a, []string{pager}, map[string]string{"PAGER_DB": b})
+
+	want := "vm: this store enrolled the far store as \"vm\" (store " + idB + ")\n" +
+		"vm: the far store enrolled this store as \"laptop\" (store " + idA + ")\n" +
+		"vm: ok (this store " + idA + ", far store " + idB + ")\n"
+	if out := mustCLI(t, "enroll", "--config", cfg); out != want {
+		t.Fatalf("enroll on fresh stores:\n%s\nwant:\n%s", out, want)
+	}
+	if out := mustCLI(t, "check", "--config", cfg); !strings.HasPrefix(out, "vm: ok (this store ") {
+		t.Fatalf("check after enroll: %q", out)
+	}
+	want = "vm: this store already enrolled the far store as \"vm\"\n" +
+		"vm: the far store already enrolled this store as \"laptop\"\n" +
+		"vm: ok (this store " + idA + ", far store " + idB + ")\n"
+	if out := mustCLI(t, "enroll", "vm", "--config", cfg); out != want {
+		t.Fatalf("enroll again:\n%s\nwant:\n%s", out, want)
+	}
+
+	c, d := filepath.Join(dir, "c.db"), filepath.Join(dir, "d.db")
+	run(c, "peer", "add", "vm", "--store", idA) // vm is some other store here
+	cfg = writeConfig(t, pager, c, []string{pager}, map[string]string{"PAGER_DB": d})
+	code, out, _ := cli(t, "enroll", "--config", cfg)
+	if code != 1 || !strings.Contains(out, "`pager peer rebind vm --store "+run(d, "relay", "id")+"`") || strings.Contains(out, "enrolled this store") {
+		t.Fatalf("enroll over a name bound to another store: exit %d\n%s", code, out)
+	}
+}
+
 // TestStatusShowsWaiting: with a switchboard holding the link, status says per
 // direction whether it waits on relay wait or polls a side without it, in
 // text and in --json; with none, or with the link stopped, it says neither.
