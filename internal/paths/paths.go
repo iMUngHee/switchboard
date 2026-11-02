@@ -4,6 +4,7 @@ package paths
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -38,12 +39,18 @@ func ConfigFile(flagValue string) (path, source string, err error) {
 	if runtime.GOOS == "windows" {
 		dir, err = envDir("APPDATA")
 	} else {
-		dir, err = xdgDir("XDG_CONFIG_HOME", ".config")
+		dir, err = ConfigHome()
 	}
 	if err != nil {
 		return "", "", err
 	}
 	return filepath.Join(dir, "switchboard", "config.toml"), SourceDefault, nil
+}
+
+// ConfigHome is the XDG configuration directory on macOS and Linux:
+// $XDG_CONFIG_HOME, or ~/.config. The systemd user unit lives under it too.
+func ConfigHome() (string, error) {
+	return xdgDir("XDG_CONFIG_HOME", ".config")
 }
 
 // StateDir returns the directory for state files, locks and control
@@ -83,11 +90,16 @@ func xdgDir(env, fallback string) (string, error) {
 	return filepath.Join(home, fallback), nil
 }
 
-// envDir returns a Windows known folder from its environment variable.
+// envDir returns a Windows known folder from its environment variable. A
+// relative value is refused for the reason xdgDir ignores one; there is no
+// home fallback to use instead.
 func envDir(env string) (string, error) {
 	v := os.Getenv(env)
 	if v == "" {
 		return "", errors.New("%" + env + "% is not set")
+	}
+	if !filepath.IsAbs(v) {
+		return "", fmt.Errorf("%%%s%% is not an absolute path: %q", env, v)
 	}
 	return v, nil
 }

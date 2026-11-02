@@ -100,6 +100,26 @@ func TestDefaultLocations(t *testing.T) {
 	}
 }
 
+// TestKnownFoldersMustBeAbsolute: a Windows known folder from the
+// environment is used only when it is absolute. envDir is checked directly so
+// the rule is pinned on every system, not only on Windows.
+func TestKnownFoldersMustBeAbsolute(t *testing.T) {
+	const env = "SWITCHBOARD_TEST_KNOWN_FOLDER"
+	abs := t.TempDir()
+	t.Setenv(env, abs)
+	if d, err := envDir(env); err != nil || d != abs {
+		t.Errorf("absolute: %q, %v; want %q", d, err, abs)
+	}
+	t.Setenv(env, filepath.Join("relative", "AppData"))
+	if d, err := envDir(env); err == nil {
+		t.Errorf("relative: %q accepted", d)
+	}
+	t.Setenv(env, "")
+	if d, err := envDir(env); err == nil {
+		t.Errorf("unset: %q accepted", d)
+	}
+}
+
 func wantPaths(t *testing.T, config, state string) {
 	t.Helper()
 	if p, src, err := ConfigFile(""); err != nil || p != config || src != SourceDefault {

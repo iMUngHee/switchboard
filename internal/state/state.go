@@ -21,6 +21,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 )
 
@@ -205,7 +206,10 @@ func Request(stateDir, key, kind string) error {
 
 // Take removes and returns the link's pending requests, in a fixed order.
 // Removing a request is what claims it, so two takers never both act on one.
-// On an error it still returns what it took.
+// On an error it still returns what it took. On Windows the removal fails with
+// a sharing violation while Request has the file open for its brief create and
+// close; that request is still there, and the caller takes it on its next
+// tick.
 func Take(stateDir, key string) ([]string, error) {
 	if err := checkKey(key); err != nil {
 		return nil, err
@@ -249,18 +253,15 @@ func statePath(stateDir, key string) string {
 	return filepath.Join(stateDir, key+".json")
 }
 
-// checkKey refuses a key that could name a file outside the state directory.
-// Store ids are hex and peer names are [a-z0-9-], so a real key never trips
-// it.
+// validKey is the only shape a real key has: pager's store id, 32 lowercase
+// hex digits, then a peer name. A key becomes a file name, so nothing else is
+// let through: no separator or "..", and no Windows device name such as NUL or
+// CON, which a hex id can never spell.
+var validKey = regexp.MustCompile(`^[0-9a-f]{32}\.[a-z0-9][a-z0-9-]{0,31}$`)
+
 func checkKey(key string) error {
-	if key == "" || key[0] == '.' {
-		return fmt.Errorf("state: invalid key %q", key)
-	}
-	for i := 0; i < len(key); i++ {
-		c := key[i]
-		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '.' || c == '-' || c == '_') {
-			return fmt.Errorf("state: invalid key %q", key)
-		}
+	if !validKey.MatchString(key) {
+		return fmt.Errorf("state: invalid key %q; want <store id>.<peer>", key)
 	}
 	return nil
 }

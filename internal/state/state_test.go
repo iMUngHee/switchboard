@@ -262,11 +262,22 @@ func TestLockIsOneProcessAndDiesWithIt(t *testing.T) {
 	}
 }
 
-// TestKeysCannotLeaveTheStateDir: a key is a file name, so one that could
-// reach outside the state directory is refused everywhere.
+// TestKeysCannotLeaveTheStateDir: a key is a file name, so only the shape a
+// real key has, <32 hex>.<peer>, is let through anywhere — nothing that could
+// reach outside the state directory, and no Windows device name.
 func TestKeysCannotLeaveTheStateDir(t *testing.T) {
 	dir := t.TempDir()
-	for _, key := range []string{"", "../x", "a/b", `a\b`, ".hidden"} {
+	for _, key := range []string{
+		"", "../x", "a/b", `a\b`, ".hidden",
+		"NUL", "con", "COM1", "nul.vm", // Windows device names
+		storeID + "/vm", storeID + `\vm`, storeID + "..vm", storeID + ".", storeID + ".-vm", storeID + ".VM",
+		storeID[:31] + ".vm",                    // id too short
+		strings.ToUpper(storeID) + ".vm",        // pager ids are lower case
+		storeID + ".vm.json",                    // a second dot
+		storeID + "." + strings.Repeat("a", 33), // peer name too long
+		"../" + storeID + ".vm",                 // a real key behind a climb
+		storeID + "a.vm",                        // id too long
+	} {
 		if _, err := Load(dir, key); err == nil {
 			t.Errorf("Load(%q) accepted it", key)
 		}
@@ -280,8 +291,22 @@ func TestKeysCannotLeaveTheStateDir(t *testing.T) {
 		if err := Request(dir, key, KindOnce); err == nil {
 			t.Errorf("Request(%q) accepted it", key)
 		}
+		if _, err := Take(dir, key); err == nil {
+			t.Errorf("Take(%q) accepted it", key)
+		}
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("refused keys left files behind: %v", entries)
 	}
 	if got := Key(storeID, "vm"); got != storeID+".vm" {
 		t.Errorf("Key = %q", got)
+	}
+	// The real shape works end to end, the longest peer name included.
+	long := Key(storeID, strings.Repeat("a", 32))
+	if err := Request(dir, long, KindOnce); err != nil {
+		t.Errorf("Request(%q): %v", long, err)
+	}
+	if kinds, err := Take(dir, long); err != nil || len(kinds) != 1 {
+		t.Errorf("Take(%q) = %q, %v", long, kinds, err)
 	}
 }
