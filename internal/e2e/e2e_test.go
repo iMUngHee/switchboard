@@ -9,8 +9,11 @@
 //
 // For the ssh run, SWITCHBOARD_E2E_SSH_PORT and SWITCHBOARD_E2E_SSH_KEY name
 // the sshd and the client key, and SWITCHBOARD_E2E_FAR_DB the far store's
-// database, which the sshd hands pager through SetEnv. Never point these at
-// a real store: the test enrolls peers in it and sends mail.
+// database, which the far side must give pager: the Linux job's sshd does it
+// with SetEnv. SWITCHBOARD_E2E_FAR_PAGER, when set, is the far pager as the
+// far shell names it; the Windows job points it at a Git Bash wrapper that
+// sets the database and runs pager.exe. Never point these at a real store:
+// the test enrolls peers in it and sends mail.
 package e2e
 
 import (
@@ -40,9 +43,13 @@ func TestRoundTripBothWays(t *testing.T) {
 	lit := func(v string) string { return "'" + v + "'" }
 	far := fmt.Sprintf("[link.vm.exec]\nargv = [%s]\nenv = { PAGER_DB = %s }\n", lit(s.Pager), lit(s.B))
 	if port != "" {
+		farPager := s.Pager
+		if p := os.Getenv("SWITCHBOARD_E2E_FAR_PAGER"); p != "" {
+			farPager = p
+		}
 		known := filepath.Join(t.TempDir(), "known_hosts")
 		far = fmt.Sprintf("[link.vm.ssh]\nhost = '127.0.0.1'\npager = %s\noptions = ['-p', %s, '-i', %s, '-o', 'StrictHostKeyChecking=accept-new', '-o', %s]\n",
-			lit(s.Pager), lit(port), lit(os.Getenv("SWITCHBOARD_E2E_SSH_KEY")), lit("UserKnownHostsFile="+known))
+			lit(farPager), lit(port), lit(os.Getenv("SWITCHBOARD_E2E_SSH_KEY")), lit("UserKnownHostsFile="+known))
 	}
 	// config writes a configuration for the link, with linkKeys added to it.
 	config := func(linkKeys string) string {

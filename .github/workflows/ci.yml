@@ -63,7 +63,8 @@ jobs:
       - run: go test -tags e2e -count=1 -v ./internal/e2e
 
   # The same through the ssh preset, to an sshd on localhost whose sessions
-  # get the far store's database through SetEnv.
+  # get the far store's database through SetEnv; then no far waiter may be
+  # left once the test's daemon has stopped.
   ssh-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -103,10 +104,143 @@ jobs:
             echo "SWITCHBOARD_E2E_SSH_KEY=$d/client_key"
             echo "SWITCHBOARD_E2E_FAR_DB=$far_db"
           } >> "$GITHUB_ENV"
+      # The check below must see a waiter that is there, or its pass means nothing.
+      - name: the far-waiter check sees a waiter
+        run: |
+          bash -c 'sleep 60; : relay wait' &
+          planted=$!
+          sleep 1
+          found=$(pgrep -f 'relay wait' || true)
+          kill "$planted"
+          [ -n "$found" ] || { echo "::error::the check missed a planted waiter"; exit 1; }
       - run: go test -tags e2e -count=1 -v ./internal/e2e
+      # The test's daemon has stopped; its waits on the far side must have ended
+      # with it, on stdin's end, rather than run out their timeout.
+      - name: no far waiter is left
+        run: |
+          sleep 15
+          if pgrep -af 'relay wait'; then echo "::error::a relay wait outlived the daemon"; exit 1; fi
       - name: sshd log
         if: failure()
         run: sudo cat "$RUNNER_TEMP/sshd/sshd.log"
+
+  # The ssh preset from Windows: ssh.exe to an OpenSSH Server on this runner,
+  # whose default shell is Git Bash since the far shell must be POSIX. The far
+  # side is this machine; what is under test is the client half, ssh.exe
+  # carrying a held stdin and ending with the daemon. A Git Bash wrapper gives
+  # the far pager its store.
+  windows-ssh-e2e:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: start an sshd on localhost
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ossh = 'C:\Windows\System32\OpenSSH'
+          $bash = 'C:\Program Files\Git\bin\bash.exe'
+          Write-Host "sshd present: $(Test-Path "$ossh\sshd.exe")"
+          if (-not (Test-Path "$ossh\sshd.exe")) {
+            Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null
+          }
+          & "$ossh\ssh.exe" -V
+          # A first start writes the host keys and the default configuration.
+          Set-Service sshd -StartupType Manual
+          Start-Service sshd
+          Stop-Service sshd
+          New-Item -Path HKLM:\SOFTWARE\OpenSSH -Force | Out-Null
+          New-ItemProperty -Path HKLM:\SOFTWARE\OpenSSH -Name DefaultShell -Value $bash -PropertyType String -Force | Out-Null
+          New-ItemProperty -Path HKLM:\SOFTWARE\OpenSSH -Name DefaultShellCommandOption -Value '-c' -PropertyType String -Force | Out-Null
+
+          $d = Join-Path $env:RUNNER_TEMP 'sshd'
+          $far = Join-Path $env:RUNNER_TEMP 'far'
+          New-Item -ItemType Directory -Force $d, $far | Out-Null
+          $key = Join-Path $d 'client_key'
+          $posix = { param($w) (& $bash -c "cygpath -u '$w'").Trim() }
+          & $bash -c "ssh-keygen -q -t ed25519 -N '' -f '$(& $posix $key)'"
+          if ($LASTEXITCODE -ne 0) { throw "ssh-keygen failed" }
+          icacls $key /inheritance:r /grant:r "$($env:USERNAME):F" | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "icacls on the client key failed" }
+          $auth = 'C:\ProgramData\ssh\administrators_authorized_keys'
+          Copy-Item "$key.pub" $auth -Force
+          icacls $auth /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "icacls on authorized keys failed" }
+          $cfg = @(
+            'Port 2222',
+            'ListenAddress 127.0.0.1',
+            'PubkeyAuthentication yes',
+            'PasswordAuthentication no',
+            'KbdInteractiveAuthentication no',
+            'Match Group administrators',
+            '  AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys'
+          ) -join "`n"
+          [IO.File]::WriteAllText('C:\ProgramData\ssh\sshd_config', "$cfg`n")
+          Start-Service sshd
+
+          # The pager the test runs, built here so the far wrapper can name it.
+          $ver = (Select-String -Path internal\testenv\testenv.go -Pattern 'const PagerVersion = "([0-9a-f]+)"').Matches[0].Groups[1].Value
+          $env:GOBIN = Join-Path $env:RUNNER_TEMP 'pager'
+          $env:CGO_ENABLED = '0'
+          go install "github.com/iMUngHee/pager/cmd/pager@$ver"
+          if ($LASTEXITCODE -ne 0) { throw "go install pager failed" }
+          $pager = Join-Path $env:GOBIN 'pager.exe'
+          $db = Join-Path $far 'b.db'
+          $wrapper = Join-Path $far 'pager'
+          $lines = @(
+            '#!/bin/bash',
+            "export PAGER_DB='$($db -replace '\\', '/')' PAGER_WAKE=off PAGER_CLIENT=none",
+            "exec '$(& $posix $pager)' `"`$@`""
+          ) -join "`n"
+          [IO.File]::WriteAllText($wrapper, "$lines`n")
+          $farPager = & $posix $wrapper
+          Get-Content $wrapper
+
+          # ssh.exe through Git Bash to the far pager, as the link will.
+          $kh = Join-Path $d 'known_hosts'
+          $out = & "$ossh\ssh.exe" -p 2222 -i $key -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$kh" 127.0.0.1 "uname -s; $farPager help | grep -c 'wait --peer'"
+          if ($LASTEXITCODE -ne 0) { throw "ssh to the local sshd failed" }
+          Write-Host "far side: $($out -join ' / ')"
+          if (-not ($out[0] -match 'MINGW|MSYS')) { throw "the far shell is not Git Bash" }
+          if ($out[1] -ne '1') { throw "the far pager has no relay wait" }
+
+          "$ossh" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          @(
+            "SWITCHBOARD_E2E_SSH_PORT=2222",
+            "SWITCHBOARD_E2E_SSH_KEY=$key",
+            "SWITCHBOARD_E2E_FAR_DB=$db",
+            "SWITCHBOARD_E2E_FAR_PAGER=$farPager",
+            "SWITCHBOARD_TEST_PAGER=$pager"
+          ) | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: the far-waiter check sees a waiter
+        shell: pwsh
+        run: |
+          $planted = Start-Process pwsh -ArgumentList '-NoProfile', '-Command', 'Start-Sleep 60 # relay wait' -PassThru -WindowStyle Hidden
+          Start-Sleep 2
+          $found = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'relay wait' })
+          Stop-Process -Id $planted.Id -Force
+          if ($found.Count -eq 0) { throw "the check missed a planted waiter" }
+      - name: the ssh client is Windows OpenSSH
+        shell: pwsh
+        run: |
+          $src = (Get-Command ssh).Source
+          Write-Host "ssh on PATH: $src"
+          if ($src -ne 'C:\Windows\System32\OpenSSH\ssh.exe') { throw "the link would not use Windows OpenSSH" }
+      - run: go test -tags e2e -count=1 -v ./internal/e2e
+      - name: no far waiter is left
+        shell: pwsh
+        run: |
+          Start-Sleep 15
+          $left = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'relay wait' })
+          $left | Format-List ProcessId, Name, CommandLine
+          if ($left.Count -gt 0) { throw "a relay wait outlived the daemon" }
+      - name: sshd events
+        if: failure()
+        shell: pwsh
+        run: Get-WinEvent -LogName 'OpenSSH/Operational' -MaxEvents 40 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message
 
   # The real service, installed as the runner's user: it must carry mail,
   # hold its link, and leave nothing behind when uninstalled.
