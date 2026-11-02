@@ -1,6 +1,8 @@
 package service
 
 import (
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -78,16 +80,52 @@ func TestQuoteWindowsArg(t *testing.T) {
 	}
 }
 
-// TestTaskListed: the task is found in schtasks' CSV listing by its name in
-// the root folder, whatever the case, and not by a longer or nested name.
-func TestTaskListed(t *testing.T) {
-	list := "\"\\Microsoft\\Windows\\Defrag\\ScheduledDefrag\",\"N/A\",\"Ready\"\r\n" +
-		"\"\\Switchboard\",\"N/A\",\"Running\"\r\n" +
-		"\"\\switchboard-spike\",\"N/A\",\"Ready\"\r\n"
-	if !taskListed(list, "switchboard") {
-		t.Error("the task was not found")
+// TestTaskStatusAsksPowerShell: the status check is one Get-ScheduledTask
+// query for the named task in the root folder, run by Windows PowerShell
+// from System32; a name that could change the script is refused before it
+// is written in, and only a lone "registered" or "absent" is an answer.
+func TestTaskStatusAsksPowerShell(t *testing.T) {
+	t.Setenv("SystemRoot", `C:\Windows`)
+	path, args, err := taskQuery("switchboard")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if taskListed(list, "spike") || taskListed(list, "ScheduledDefrag") || taskListed("", "switchboard") {
-		t.Error("a task was found that is not there")
+	wantArgs := []string{"-NoProfile", "-NonInteractive", "-Command",
+		`try { $null = Get-ScheduledTask -TaskName 'switchboard' -TaskPath '\' -ErrorAction Stop; 'registered' } ` +
+			`catch { if ($_.FullyQualifiedErrorId -like 'CmdletizationQuery_NotFound*') { 'absent' } else { throw } }`}
+	if want := filepath.Join(`C:\Windows`, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"); path != want || !slices.Equal(args, wantArgs) {
+		t.Errorf("runs\n %q %q\nwant\n %q %q", path, args, want, wantArgs)
+	}
+
+	for _, name := range []string{"", "sw'x", "sw\u2019x", "sw`x", "$x", "sw*", "sw?", "sw[1]", `Folder\sw`, "sw x", "-sw", ".sw", "sw\n"} {
+		if p, a, err := taskQuery(name); err == nil {
+			t.Errorf("taskQuery(%q) = %q %q, not refused", name, p, a)
+		}
+	}
+	t.Setenv("SystemRoot", "")
+	if p, _, err := taskQuery("switchboard"); err == nil {
+		t.Errorf("without SystemRoot it runs %q", p)
+	}
+
+	for _, tc := range []struct {
+		out        string
+		registered bool
+		fail       bool
+	}{
+		{"registered\r\n", true, false},
+		{"absent\r\n", false, false},
+		{"registered", true, false},
+		{"absent\n", false, false},
+		{"", false, true},
+		{"\r\n", false, true},
+		{"Registered\r\n", false, true},
+		{"absent\r\nregistered\r\n", false, true},
+		{"WARNING: something\r\nabsent\r\n", false, true},
+		{"not absent\r\n", false, true},
+	} {
+		registered, err := taskAnswer(tc.out)
+		if registered != tc.registered || (err != nil) != tc.fail {
+			t.Errorf("taskAnswer(%q) = %v, %v; want %v, failing %v", tc.out, registered, err, tc.registered, tc.fail)
+		}
 	}
 }

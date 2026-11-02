@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode/utf16"
 )
@@ -207,31 +208,60 @@ func UninstallTask(name string) error {
 	return err
 }
 
-// TaskStatus reports whether the task is registered. A query for it by name
-// that succeeds says so; one that fails could mean either, since schtasks
-// says why only in the system's language, so the list of all tasks decides,
-// and an error listing them is an error rather than "not registered".
-// Whether its process runs is not read from schtasks, whose status column is
-// localized too; the link locks say whether a switchboard holds the links.
+// TaskStatus reports whether the task is registered, asking Task Scheduler
+// about that one task (taskQuery) rather than listing every task, which a
+// standard user may be refused. Whether its process runs is not read: Task
+// Scheduler's state names are localized, and the link locks say whether a
+// switchboard holds the links.
 func TaskStatus(name string) (Status, error) {
-	if _, err := schtasks("/Query", "/TN", name); err == nil {
-		return Status{Registered: true}, nil
-	}
-	out, err := schtasks("/Query", "/FO", "CSV", "/NH")
+	path, args, err := taskQuery(name)
 	if err != nil {
 		return Status{}, err
 	}
-	return Status{Registered: taskListed(out, name)}, nil
+	var stderr bytes.Buffer
+	cmd := exec.Command(path, args...)
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return Status{}, fmt.Errorf("Get-ScheduledTask %s: %w: %s", name, err, strings.TrimSpace(stderr.String()))
+	}
+	registered, err := taskAnswer(string(out))
+	return Status{Registered: registered}, err
 }
 
-// taskListed reports whether a `schtasks /Query /FO CSV /NH` listing holds
-// a task of this name in the root folder.
-func taskListed(csv, name string) bool {
-	want := `"\` + strings.ToLower(name) + `"`
-	for _, line := range strings.Split(csv, "\n") {
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), want+",") {
-			return true
-		}
+// taskName is what a task name may be before it is written into a
+// PowerShell script: no quote of any kind (PowerShell takes the typographic
+// ones as quotes too), no $ or backtick, no wildcard, which -TaskName would
+// match, and no \, which would name a folder.
+var taskName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+// taskQuery is the command TaskStatus runs: Windows PowerShell from System32,
+// never one found on PATH, asking for the task of this name in the root
+// folder, where schtasks /TN puts it. A task that is not there prints
+// "absent", told by its error id, which unlike the message is not localized.
+// Any other error, a refusal say, is rethrown, so PowerShell fails rather
+// than answering for a task it could not read.
+func taskQuery(name string) (path string, args []string, err error) {
+	if !taskName.MatchString(name) {
+		return "", nil, fmt.Errorf("task name %q must be letters, digits and _.- only", name)
 	}
-	return false
+	root := os.Getenv("SystemRoot")
+	if root == "" {
+		return "", nil, errors.New("SystemRoot is not set")
+	}
+	script := `try { $null = Get-ScheduledTask -TaskName '` + name + `' -TaskPath '\' -ErrorAction Stop; 'registered' } ` +
+		`catch { if ($_.FullyQualifiedErrorId -like 'CmdletizationQuery_NotFound*') { 'absent' } else { throw } }`
+	return filepath.Join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+		[]string{"-NoProfile", "-NonInteractive", "-Command", script}, nil
+}
+
+// taskAnswer reads what taskQuery printed: "registered" or "absent", alone.
+func taskAnswer(stdout string) (registered bool, err error) {
+	switch strings.TrimSpace(stdout) {
+	case "registered":
+		return true, nil
+	case "absent":
+		return false, nil
+	}
+	return false, fmt.Errorf("Get-ScheduledTask answered %q, not registered or absent", stdout)
 }

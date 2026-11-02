@@ -16,3 +16,14 @@ func TestQuoteMatchesTheRuntime(t *testing.T) {
 		}
 	}
 }
+
+// TestTaskStatusOfAnAbsentTask runs the real query, read-only: a task no one
+// registered is absent rather than an error, and so is ScheduledDefrag,
+// which Windows keeps in a subfolder, not the root folder the query asks.
+func TestTaskStatusOfAnAbsentTask(t *testing.T) {
+	for _, name := range []string{"switchboard-test-no-such-task", "ScheduledDefrag"} {
+		if st, err := TaskStatus(name); err != nil || st != (Status{}) {
+			t.Errorf("TaskStatus(%q) = %+v, %v; want not registered", name, st, err)
+		}
+	}
+}
