@@ -21,6 +21,15 @@ const (
 	JitterFraction = 0.2              // backoff waits vary by up to ±20%
 )
 
+// Waiting for mail with pager's relay wait (plan relay-wait-trigger). After a
+// round that left nothing to carry, a direction asks the side its mail comes
+// from to say when mail is waiting, instead of sleeping for its poll interval.
+const (
+	WaitTimeout = 5 * time.Minute  // what relay wait is given; a round runs on its answer either way
+	waitSlack   = 30 * time.Second // the invocation's deadline beyond WaitTimeout, for connecting and ending
+	WaitRetry   = time.Hour        // a side without relay wait is polled this long before it is asked again
+)
+
 // direction is one direction of a link at run time: how to run it, its part
 // of the stored state, and what the scheduler remembers between rounds.
 type direction struct {
@@ -36,11 +45,26 @@ type direction struct {
 	streak     string      // the code of the current streak of pager failures
 	streakAt   []time.Time // when each failure of that streak happened, within DegradedWindow
 	isDegraded bool        // a streak got long enough; it holds until a success or a resume
+
+	settled     bool      // the last round left nothing to carry, so the next pause may wait for mail
+	woke        bool      // the pause before the last round ended on relay wait's "ready"
+	noWaitUntil time.Time // relay wait is missing on the From side: poll until then
 }
 
 // after records outcome o, which ended at now, and returns how long to wait
 // before the next round. jitter spreads a backoff; tests pass none.
+//
+// It also decides whether the next pause may wait for mail instead: only
+// after a round that left nothing to carry, since relay wait counts deferred
+// mail as waiting and must never stand in for a backoff or a deferral. A
+// round that found nothing right after "ready" means wait and relay out
+// disagree, and the pause after it is an ordinary poll.
 func (d *direction) after(o round.Outcome, now time.Time, jitter func(time.Duration) time.Duration) time.Duration {
+	d.settled = (o.Class == round.Idle || o.Class == round.OK) &&
+		o.NotBefore.IsZero() && !o.Full && o.Finals == o.Records && len(o.Pending) == 0 &&
+		!(d.woke && o.Records == 0)
+	d.woke = false
+
 	st := d.st
 	st.Class, st.Code = string(o.Class), o.Code
 	st.PendingAck = o.Pending

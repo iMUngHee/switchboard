@@ -21,6 +21,10 @@ import (
 // step is what one invocation does, in this order: read stdin (unless
 // skip_stdin), sleep, write stderr, write stdout, maybe leave a child holding
 // stdout, maybe kill itself, then exit.
+//
+// wait_stdin_ms replaces reading stdin, the way relay wait treats it: stdin
+// must stay open that long. If it closes sooner, the step prints "eof" and
+// exits 0 at once; otherwise it carries on with the rest.
 type step struct {
 	Stdout      string `json:"stdout"`
 	StdoutBytes int    `json:"stdout_bytes"` // then this many 'x' bytes
@@ -29,6 +33,7 @@ type step struct {
 	Exit        int    `json:"exit"`
 	SleepMS     int    `json:"sleep_ms"`
 	SkipStdin   bool   `json:"skip_stdin"`
+	WaitStdinMS int    `json:"wait_stdin_ms"`
 	LeaveChild  bool   `json:"leave_child"`
 	KillSelf    bool   `json:"kill_self"` // end by os.Kill: SIGKILL on Unix
 }
@@ -55,7 +60,7 @@ func main() {
 	}
 
 	var stdin []byte
-	if !s.SkipStdin {
+	if !s.SkipStdin && s.WaitStdinMS == 0 {
 		stdin, _ = io.ReadAll(os.Stdin)
 	}
 	if log := os.Getenv("TESTPAGER_LOG"); log != "" {
@@ -63,6 +68,16 @@ func main() {
 		if err == nil {
 			_ = json.NewEncoder(f).Encode(map[string]any{"args": os.Args[1:], "stdin": string(stdin), "pid": os.Getpid()})
 			f.Close()
+		}
+	}
+	if s.WaitStdinMS > 0 {
+		closed := make(chan struct{})
+		go func() { _, _ = io.Copy(io.Discard, os.Stdin); close(closed) }()
+		select {
+		case <-closed:
+			fmt.Println("eof")
+			os.Exit(0)
+		case <-time.After(time.Duration(s.WaitStdinMS) * time.Millisecond):
 		}
 	}
 	if s.SleepMS > 0 {

@@ -3,8 +3,10 @@
 ## A laptop and a remote VM
 
 The laptop can reach the VM over ssh; the VM cannot reach the laptop. So
-switchboard runs on the laptop only, and asks the VM for its mail every
-`poll_inbound`. The VM needs only pager.
+switchboard runs on the laptop only, and keeps a `pager relay wait` open on the
+VM that answers as soon as mail is waiting there; with a pager on the VM that
+has no `relay wait`, it asks for the VM's mail every `poll_inbound` instead.
+The VM needs only pager.
 
 ```toml
 version = 1
@@ -28,7 +30,7 @@ switchboard service install
 ```
 
 - If ssh needs a jump host or a hardware key, put that in `~/.ssh/config` under
-  the host's alias. A ControlMaster there makes every poll cheap.
+  the host's alias. A ControlMaster there makes every round cheap.
 - When the laptop sleeps, the shared connection dies. With a key in an agent,
   ssh connects again by itself. With one that needs a touch or a passphrase,
   or a jump host that asks for one, batch-mode ssh fails until a person runs
@@ -64,8 +66,10 @@ The Linux side is the same with `remote_peer = "linux"` and its own pager path.
 
 - The Pi's sessions address the OS that is up: `kipa@win` or `kipa@linux`. Mail
   for the one that is down waits on its sender until it boots.
-- Windows OpenSSH cannot share connections, so every poll is a fresh
-  handshake; raise `poll_inbound` if that is too often.
+- Windows OpenSSH cannot share connections, so every round is a fresh
+  handshake. An idle link with `relay wait` on the Pi makes about two every five
+  minutes; without it, one every `poll_inbound`, which you can raise if that is
+  too often.
 - On Windows a link that needs you is written to the log, unless `[notify]`
   names a program to run.
 
@@ -75,8 +79,9 @@ The Linux side is the same with `remote_peer = "linux"` and its own pager path.
   every pair of stores that exchanges mail must be peers, each with its own
   link. The two operating systems of a dual-boot desktop can never mail each
   other through the Pi.
-- **Polling.** Mail from the far side arrives within `poll_inbound`, not at once;
-  there is no push from the far side.
+- **No push.** The far side cannot start anything. Its mail arrives about a
+  second after it is waiting while switchboard holds a `relay wait` open there,
+  and within `poll_inbound` when the far pager has no `relay wait`.
 - **The far shell.** The ssh link runs pager through the far side's login shell,
   which must be a POSIX one and print nothing to stdout before pager does. A
   banner there is caught by `switchboard check`.

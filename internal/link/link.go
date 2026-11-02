@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -77,7 +78,23 @@ type Link struct {
 	now      func() time.Time
 	jitter   func(time.Duration) time.Duration
 	runRound func(ctx context.Context, e *round.Engine, d round.Direction, in round.Input) round.Outcome
+	runWait  func(ctx context.Context, d *direction) waitAnswer // nil: never wait for mail, only poll
+	// awaitEvery is how often a wait for mail looks at the clock and the
+	// link's stop mark; zero means maxSleep.
+	awaitEvery time.Duration
+	// waitFor is what relay wait is asked to wait; zero means WaitTimeout.
+	waitFor time.Duration
 }
+
+// waitAnswer is what one relay wait came to.
+type waitAnswer int
+
+const (
+	waitFailed  waitAnswer = iota // no usable answer: poll once
+	waitReady                     // mail is waiting on the From side
+	waitTimeout                   // none came within WaitTimeout
+	waitMissing                   // exit 2: that pager has no relay wait, or refuses the peer
+)
 
 // ErrDriven means another switchboard process already drives the link.
 var ErrDriven = errors.New("another switchboard process already drives this link")
@@ -122,6 +139,7 @@ func Open(ctx context.Context, opt Options) (*Link, error) {
 		now: wallClock, jitter: spread, runRound: func(ctx context.Context, e *round.Engine, d round.Direction, in round.Input) round.Outcome {
 			return e.Run(ctx, d, in)
 		}}
+	l.runWait = l.relayWait
 	l.awake = l.now()
 	cfg := opt.Config
 	l.dirs[0] = &direction{name: "outbound", poll: cfg.PollOutbound, st: &l.st.Outbound,
@@ -173,12 +191,150 @@ func (l *Link) loop(ctx, roundCtx context.Context, i int, d *direction) {
 	l.mu.Lock()
 	wait := d.firstWait(l.now())
 	l.mu.Unlock()
-	for l.sleep(ctx, i, wait) {
+	for l.pause(ctx, i, d, wait) {
 		wait, _ = l.turn(ctx, roundCtx, d)
 		if ctx.Err() != nil {
 			return
 		}
 	}
+}
+
+// pause waits before d's next round: for mail, through relay wait, when the
+// last round left nothing to carry; otherwise for wait (see sleep). It
+// reports false when ctx ended.
+func (l *Link) pause(ctx context.Context, i int, d *direction, wait time.Duration) bool {
+	if !l.mayWait(d) {
+		return l.sleep(ctx, i, wait)
+	}
+	return l.await(ctx, i, d)
+}
+
+// mayWait says whether d's next pause waits for mail: the last round left
+// nothing to carry (see direction.after), the link is not stopped, and the
+// From side is not known to lack relay wait.
+func (l *Link) mayWait(d *direction) bool {
+	if l.runWait == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return d.settled && !l.st.NeedsHuman && !l.now().Before(d.noWaitUntil)
+}
+
+// await runs relay wait on the side d's mail comes from and returns when it
+// answers, so the next round runs as soon as mail is waiting. Like sleep it
+// ends on a wake-up (resume, a once request) and notices the machine
+// sleeping, after which it runs a round at once: the wait was cut off with
+// the network. A wait holds no round slot and does not get the grace rounds
+// get at shutdown. It is always ended and reaped before await returns.
+func (l *Link) await(ctx context.Context, i int, d *direction) bool {
+	wctx, cancel := context.WithCancel(ctx)
+	answer := make(chan waitAnswer, 1)
+	started, wallStarted := time.Now(), l.now()
+	go func() { answer <- l.runWait(wctx, d) }()
+	end := func() { cancel(); <-answer }
+	every := l.awaitEvery
+	if every <= 0 {
+		every = maxSleep
+	}
+	for {
+		expect := l.now().Add(every)
+		t := time.NewTimer(every)
+		select {
+		case a := <-answer:
+			t.Stop()
+			cancel()
+			// A timeout long before the time asked for breaks wait's
+			// contract, and taken as an answer it would run a round and
+			// a wait back to back, without end. Both clocks must say so:
+			// the monotonic one stops while the machine sleeps, and the
+			// wall clock can be set back.
+			half := l.waitTimeout() / 2
+			if a == waitTimeout && time.Since(started) < half && l.now().Sub(wallStarted) < half {
+				a = waitFailed
+			}
+			return l.answered(ctx, i, d, a)
+		case <-t.C:
+			if now := l.now(); now.Sub(expect) > time.Minute {
+				l.mu.Lock()
+				l.awake = now
+				l.mu.Unlock()
+				end()
+				return true
+			}
+			if l.stopped() {
+				end()
+				return l.sleep(ctx, i, d.poll)
+			}
+		case <-l.wake[i]:
+			t.Stop()
+			end()
+			return true
+		case <-ctx.Done():
+			t.Stop()
+			end()
+			return false
+		}
+	}
+}
+
+// answered acts on what relay wait said: a round now on "ready" and on
+// "timeout", which is the safety poll; otherwise an ordinary poll sleep
+// first. A side without relay wait is polled for WaitRetry before it is
+// asked again.
+func (l *Link) answered(ctx context.Context, i int, d *direction, a waitAnswer) bool {
+	switch a {
+	case waitReady:
+		l.mu.Lock()
+		d.woke = true
+		l.mu.Unlock()
+		return true
+	case waitTimeout:
+		return true
+	case waitMissing:
+		l.mu.Lock()
+		d.noWaitUntil = l.now().Add(WaitRetry)
+		l.mu.Unlock()
+		l.opt.Log.Info("relay wait unavailable, polling", "link", l.opt.Name, "direction", d.name, "retry_in", WaitRetry.String())
+	default:
+		l.opt.Log.Debug("relay wait failed, polling once", "link", l.opt.Name, "direction", d.name)
+	}
+	return l.sleep(ctx, i, d.poll)
+}
+
+// relayWait runs relay wait on d's From side for WaitTimeout.
+func (l *Link) relayWait(ctx context.Context, d *direction) waitAnswer {
+	r := pagercli.Runner{Timeout: l.waitTimeout() + waitSlack, StdoutCap: 1 << 10}
+	out, err := r.Hold(ctx, d.round.From.Endpoint, "relay", "wait", "--peer", d.round.From.Peer, "--timeout", l.waitTimeout().String())
+	return readWait(out, err)
+}
+
+func (l *Link) waitTimeout() time.Duration {
+	if l.waitFor > 0 {
+		return l.waitFor
+	}
+	return WaitTimeout
+}
+
+// readWait reads relay wait's answer: exactly one line, "ready" or
+// "timeout", from a clean exit.
+func readWait(out pagercli.Output, err error) waitAnswer {
+	res := out.Result
+	switch {
+	case err != nil || !res.Started || res.TimedOut || out.Over:
+		return waitFailed
+	case res.ExitCode == 2:
+		return waitMissing
+	case res.ExitCode != 0:
+		return waitFailed
+	}
+	switch strings.TrimSuffix(strings.TrimSuffix(string(out.Stdout), "\n"), "\r") {
+	case "ready":
+		return waitReady
+	case "timeout":
+		return waitTimeout
+	}
+	return waitFailed
 }
 
 // sleep waits for wait to pass on the wall clock, for a wake-up, or for ctx.
@@ -349,6 +505,7 @@ func (l *Link) Resume() {
 		d.reruns, d.drained = 0, 0
 		d.endStreak()
 		d.isDegraded = false
+		d.noWaitUntil = time.Time{}
 	}
 	l.save()
 	l.mu.Unlock()

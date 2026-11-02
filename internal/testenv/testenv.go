@@ -15,9 +15,10 @@ import (
 	"testing"
 )
 
-// PagerVersion is the pager the tests prove switchboard against: the release
-// that ships the relay contract and none of the additions planned since.
-const PagerVersion = "ad6a9f4cd854ce15e64e641615de456b2007be81"
+// PagerVersion is the pager the tests prove switchboard against: the commit
+// that adds relay wait to the relay contract. switchboard still works with a
+// pager from before it, by polling; the link tests cover that with testpager.
+const PagerVersion = "65515fe8c830d16be89d1c80f34518032ebccbe8"
 
 var (
 	pagerOnce sync.Once

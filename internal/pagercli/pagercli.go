@@ -10,6 +10,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -44,6 +46,32 @@ type Output struct {
 
 // Run runs `pager <args>` on the endpoint with stdin (nil for none).
 func (r Runner) Run(ctx context.Context, ep transport.Endpoint, stdin []byte, args ...string) (Output, error) {
+	var in io.Reader
+	if stdin != nil {
+		in = bytes.NewReader(stdin)
+	}
+	return r.run(ctx, ep, in, args)
+}
+
+// Hold runs `pager <args>` like Run, but with stdin a pipe that stays open,
+// with nothing written to it, until the command exits or ctx ends. relay wait
+// ends when its stdin closes, so the open pipe is what keeps it waiting, and
+// the pipe closing, with this process too if it dies, is what tells the far
+// side to stop.
+//
+// The command gets the pipe's read end as a file, so no goroutine copies into
+// it: one would sit in a read that never returns after the command exits.
+func (r Runner) Hold(ctx context.Context, ep transport.Endpoint, args ...string) (Output, error) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return Output{}, err
+	}
+	defer pw.Close()
+	defer pr.Close()
+	return r.run(ctx, ep, pr, args)
+}
+
+func (r Runner) run(ctx context.Context, ep transport.Endpoint, stdin io.Reader, args []string) (Output, error) {
 	if err := ep.Validate(); err != nil {
 		return Output{}, err
 	}
@@ -65,10 +93,7 @@ func (r Runner) Run(ctx context.Context, ep transport.Endpoint, stdin []byte, ar
 	out := &capped{limit: limit, over: stop}
 	errb := &head{limit: StderrKept}
 	c := ep.Command(args...)
-	spec := proc.Spec{Path: c.Path, Args: c.Args, Env: c.Env, Stdout: out, Stderr: errb}
-	if stdin != nil {
-		spec.Stdin = bytes.NewReader(stdin)
-	}
+	spec := proc.Spec{Path: c.Path, Args: c.Args, Env: c.Env, Stdin: stdin, Stdout: out, Stderr: errb}
 	res := proc.Run(ctx, spec)
 	return Output{Stdout: out.buf.Bytes(), StderrHead: errb.buf.Bytes(), Over: out.exceeded, Result: res}, nil
 }

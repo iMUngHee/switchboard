@@ -73,6 +73,12 @@ name a peer other than the one pager lists.
 - `poll_outbound` is how often this store's pending mail is checked;
   `poll_inbound` how often the far store is asked for mail. A full batch is
   carried at once, without waiting for the next poll.
+- Both are fallbacks when the pager mail comes from has `relay wait` (its
+  `pager help` lists it): a direction with nothing left to carry asks that
+  pager to say when mail is waiting, and runs its next round about a second
+  after it is, or after five minutes at the latest. The intervals apply after a
+  failure or a deferral, and against a pager without `relay wait`, which is
+  asked again an hour later.
 - `hint` is what to do when the link needs you. For an ssh link it defaults to
   running `ssh HOST` once, which is what a laptop needs after a night's sleep.
 

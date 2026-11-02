@@ -1,6 +1,7 @@
 package pagercli
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -176,6 +177,39 @@ func TestChattyStderrNeverBlocks(t *testing.T) {
 	if err != nil || out.Result.ExitCode != 0 || out.Result.TimedOut || len(out.StderrHead) != StderrKept || string(out.Stdout) != "{}\n" {
 		t.Fatalf("result %+v head=%d stdout=%q err=%v", out.Result, len(out.StderrHead), out.Stdout, err)
 	}
+}
+
+// TestHoldKeepsStdinOpen: relay wait ends when its stdin closes, so Hold must
+// keep it open for as long as the command runs, and still end the command
+// when ctx does.
+func TestHoldKeepsStdinOpen(t *testing.T) {
+	args := []string{"relay", "wait", "--peer", "laptop"}
+	t.Run("open while it runs", func(t *testing.T) {
+		ep := plan(t, map[string]map[string]any{"relay wait": {"wait_stdin_ms": 700, "stdout": "ready\n"}})
+		out, err := Runner{Timeout: time.Minute}.Hold(t.Context(), ep, args...)
+		if err != nil || out.Result.ExitCode != 0 || string(out.Stdout) != "ready\n" {
+			t.Fatalf("stdin did not stay open: stdout=%q result=%+v err=%v", out.Stdout, out.Result, err)
+		}
+		// The same step under Run, which gives no stdin, sees it closed: the
+		// check above is what tells the two apart.
+		out, err = Runner{Timeout: time.Minute}.Run(t.Context(), ep, nil, args...)
+		if err != nil || string(out.Stdout) != "eof\n" {
+			t.Fatalf("without a held stdin: stdout=%q result=%+v err=%v", out.Stdout, out.Result, err)
+		}
+	})
+	t.Run("ended with ctx", func(t *testing.T) {
+		ep := plan(t, map[string]map[string]any{"relay wait": {"wait_stdin_ms": 60000, "stdout": "ready\n"}})
+		ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		out, err := Runner{Timeout: time.Minute}.Hold(ctx, ep, args...)
+		if took := time.Since(start); took > 5*time.Second {
+			t.Fatalf("Hold returned %v after ctx ended", took)
+		}
+		if err != nil || !out.Result.TimedOut || len(out.Stdout) != 0 {
+			t.Fatalf("stdout=%q result=%+v err=%v, want a stopped command and no answer", out.Stdout, out.Result, err)
+		}
+	})
 }
 
 func TestRunRefusesUnsafeInput(t *testing.T) {
