@@ -15,6 +15,7 @@ import (
 
 	"github.com/iMUngHee/switchboard/internal/pagercli"
 	"github.com/iMUngHee/switchboard/internal/paths"
+	"github.com/iMUngHee/switchboard/internal/round"
 	"github.com/iMUngHee/switchboard/internal/state"
 	"github.com/iMUngHee/switchboard/internal/testenv"
 )
@@ -428,4 +429,13 @@ func waitFor(t *testing.T, what string, within time.Duration, cond func() bool) 
 		}
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// TestDescribeSaysAuthStops: once tells a person that an auth failure stopped
+// the link, and how to go on.
+func TestDescribeSaysAuthStops(t *testing.T) {
+	got := describe("vm", round.Outcome{Class: round.Auth, Code: "auth", Stage: round.StageOut})
+	if !strings.Contains(got, "the link is stopped") || !strings.Contains(got, "`switchboard resume vm`") {
+		t.Fatalf("describe: %q", got)
+	}
 }

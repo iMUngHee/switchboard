@@ -63,8 +63,8 @@ func TestSchedulerTiming(t *testing.T) {
 			[]time.Duration{0, 0, s(5), 0}},
 		{"an unreachable far side retries, capped at 30 seconds", 0, repeat(6, offline),
 			[]time.Duration{s(5), s(10), s(20), s(30), s(30), s(30)}},
-		{"a link waiting on credentials probes every minute", 0, repeat(2, auth),
-			[]time.Duration{time.Minute, time.Minute}},
+		{"an auth failure schedules nothing: the link stops", 0, repeat(2, auth),
+			[]time.Duration{0, 0}},
 		{"a timeout backs off like a pager failure", 0, repeat(3, round.Outcome{Class: round.Timeout, Code: round.CodeDeadline}),
 			[]time.Duration{s(5), s(10), s(20)}},
 	} {
@@ -289,5 +289,69 @@ func TestSleepIgnoresAClockSetBack(t *testing.T) {
 	defer cancel()
 	if !l.sleep(ctx, 0, 50*time.Millisecond) {
 		t.Fatal("a 50ms wait outlasted 5s after the clock was set back")
+	}
+}
+
+// TestOfflineProbesAfterTheGrace: an unreachable far side is retried with the
+// capped backoff while the grace runs, then only every OfflineProbe; a wake of
+// the machine ends that wait at once.
+func TestOfflineProbesAfterTheGrace(t *testing.T) {
+	c := newClock()
+	l, _ := testLink(t, c)
+	l.runRound = always(offline)
+	// A poll shorter than OfflineCap, as outbound has: its backoff is what
+	// stores a not-before, which a probe must not leave behind.
+	l.dirs[1].poll = 5 * time.Second
+	start := c.now()
+	var probes int
+	for c.now().Sub(start) < OfflineGrace+3*OfflineProbe {
+		w, _ := l.step(t.Context(), l.dirs[1])
+		switch past := c.now().Sub(start) >= OfflineGrace; {
+		case !past && w > OfflineCap:
+			t.Fatalf("within the grace a wait of %v, want at most %v", w, OfflineCap)
+		case past && w != OfflineProbe:
+			t.Fatalf("past the grace a wait of %v, want %v", w, OfflineProbe)
+		case past:
+			probes++
+		}
+		c.add(w)
+	}
+	if probes < 2 || !l.dirs[1].probing {
+		t.Fatalf("probes %d, probing %v", probes, l.dirs[1].probing)
+	}
+	if saved, _ := state.Load(l.opt.StateDir, l.key); !saved.Inbound.NotBefore.IsZero() {
+		t.Fatalf("a probe stored not-before %v; status would show a time long past", saved.Inbound.NotBefore)
+	}
+
+	// The machine sleeps five minutes into the probe's 30-minute wait and
+	// wakes: the wait ends there, not 25 minutes later.
+	base := c.now()
+	var calls atomic.Int32
+	l.now = func() time.Time {
+		if calls.Add(1) > 3 {
+			return base.Add(5 * time.Minute)
+		}
+		return base
+	}
+	l.tick = 20 * time.Millisecond
+	done := make(chan bool, 1)
+	go func() { done <- l.sleep(t.Context(), 1, OfflineProbe) }()
+	select {
+	case more := <-done:
+		if !more {
+			t.Fatal("the probe's sleep reported a cancelled context")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a wake did not end the probe's wait")
+	}
+
+	// A direction that is not probing sleeps on after a wake, as before.
+	l.dirs[1].probing = false
+	calls.Store(0)
+	base = c.now()
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	if more := l.sleep(ctx, 1, 10*24*time.Hour); more {
+		t.Fatal("a wake ended a wait that was not a probe")
 	}
 }

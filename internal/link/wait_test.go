@@ -71,7 +71,7 @@ func waitLink(t *testing.T, c *clock, w *waiter, outcomes ...round.Outcome) *Lin
 	t.Helper()
 	l, _ := testLink(t, c, outcomes...)
 	l.runWait = w.run
-	l.awaitEvery = 20 * time.Millisecond
+	l.tick = 20 * time.Millisecond
 	l.waitFor = 100 * time.Millisecond
 	for _, d := range l.dirs {
 		d.poll = 200 * time.Millisecond
@@ -431,7 +431,7 @@ func TestWaitFallsBackWithoutRelayWait(t *testing.T) {
 	l, _ := testLink(t, newClock())
 	l.now = wallClock
 	l.runWait = l.relayWait
-	l.awaitEvery = 20 * time.Millisecond
+	l.tick = 20 * time.Millisecond
 	for _, d := range l.dirs {
 		d.poll = 200 * time.Millisecond
 		d.round.From = round.Side{Endpoint: ep, Peer: "laptop"}

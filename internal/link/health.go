@@ -30,7 +30,13 @@ type Notifier interface {
 func (l *Link) health(now time.Time) (Health, bool) {
 	h := Healthy
 	if l.st.NeedsHuman {
+		// Stopped over credentials, it says so: the cause, not just the stop.
 		h = NeedsHuman
+		for _, d := range l.dirs {
+			if round.Class(d.st.Class) == round.Auth {
+				h = Auth
+			}
+		}
 	} else {
 		for _, d := range l.dirs {
 			if dh := l.dirHealth(d, now); healthRank[dh] > healthRank[h] {

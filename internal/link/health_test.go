@@ -1,6 +1,7 @@
 package link
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -179,14 +180,16 @@ func TestHealthTransitions(t *testing.T) {
 	})
 	t.Run("shutting down is not a recovery", func(t *testing.T) {
 		c := newClock()
-		l, rec := testLink(t, c, auth, round.Outcome{Class: round.Stopped, Pending: []string{"result"}})
-		l.step(t.Context(), l.dirs[0])
-		l.step(t.Context(), l.dirs[0])
-		if notes := rec.all(); len(notes) != 1 || notes[0].health != Auth {
+		l, rec := testLink(t, c, append(repeat(DegradedRuns, retry), round.Outcome{Class: round.Stopped, Pending: []string{"result"}})...)
+		for range DegradedRuns + 1 {
+			l.step(t.Context(), l.dirs[0])
+			c.add(time.Minute)
+		}
+		if notes := rec.all(); len(notes) != 1 || notes[0].health != Degraded {
 			t.Fatalf("notes %+v", notes)
 		}
 		saved, _ := state.Load(l.opt.StateDir, l.key)
-		if saved.Outbound.Class != string(round.Auth) || len(saved.Outbound.PendingAck) != 1 {
+		if saved.Outbound.Class != string(round.Retry) || len(saved.Outbound.PendingAck) != 1 {
 			t.Fatalf("stored %+v", saved.Outbound)
 		}
 	})
@@ -201,4 +204,48 @@ func TestHealthTransitions(t *testing.T) {
 			t.Fatalf("notes %+v", notes)
 		}
 	})
+}
+
+// TestAuthStopsTheLink: an auth failure needs a person, so one stops the link
+// instead of retrying the far side's login: it is told as auth, saved as
+// stopped, runs no further round, and runs again after a resume.
+func TestAuthStopsTheLink(t *testing.T) {
+	c := newClock()
+	l, rec := testLink(t, c)
+	var runs int
+	l.runRound = func(context.Context, *round.Engine, round.Direction, round.Input) round.Outcome {
+		runs++
+		if runs <= 2 {
+			return auth
+		}
+		return idle
+	}
+	l.step(t.Context(), l.dirs[1])
+	if !l.stopped() {
+		t.Fatal("an auth failure did not stop the link")
+	}
+	if notes := rec.all(); len(notes) != 1 || notes[0].health != Auth {
+		t.Fatalf("notes %+v, want auth once", notes)
+	}
+	if saved, _ := state.Load(l.opt.StateDir, l.key); !saved.NeedsHuman {
+		t.Fatal("the stop is not saved, so a restart would knock again")
+	}
+	for i := range l.dirs {
+		c.add(time.Hour)
+		if _, o := l.step(t.Context(), l.dirs[i]); o.Class != round.NeedsHuman || runs != 1 {
+			t.Fatalf("a stopped link ran a round (runs %d, outcome %s)", runs, o.Class)
+		}
+	}
+	// Resumed while ssh still refuses: stopped again, and told again.
+	l.Resume()
+	if _, o := l.step(t.Context(), l.dirs[1]); runs != 2 || o.Class != round.Auth || !l.stopped() {
+		t.Fatalf("after a resume that did not help: runs %d, outcome %s, stopped %v", runs, o.Class, l.stopped())
+	}
+	if notes := rec.all(); len(notes) != 2 || notes[1].health != Auth {
+		t.Fatalf("notes %+v, want auth told again after the resume", notes)
+	}
+	l.Resume()
+	if _, o := l.step(t.Context(), l.dirs[1]); runs != 3 || o.Class != round.Idle || l.stopped() {
+		t.Fatalf("after resume: runs %d, outcome %s", runs, o.Class)
+	}
 }

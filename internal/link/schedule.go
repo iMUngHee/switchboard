@@ -13,8 +13,8 @@ const (
 	DrainRounds    = 5                // back-to-back rounds before a draining direction yields
 	DrainTime      = 30 * time.Second // or this long, whichever comes first
 	RetryCap       = 5 * time.Minute  // the longest backoff after a pager failure
-	OfflineCap     = 30 * time.Second // the longest wait while the far side is unreachable
-	AuthProbe      = time.Minute      // how often a link waiting on credentials tries again
+	OfflineCap     = 30 * time.Second // the longest wait while the far side is unreachable, within OfflineGrace
+	OfflineProbe   = 30 * time.Minute // past OfflineGrace, how often an unreachable far side is tried
 	OfflineGrace   = 10 * time.Minute // unreachable this long after the last contact: tell a person
 	DegradedRuns   = 5                // the same failure this many times …
 	DegradedWindow = 15 * time.Minute // … within this long: tell a person, keep retrying
@@ -48,6 +48,7 @@ type direction struct {
 
 	settled bool // the last round left nothing to carry, so the next pause may wait for mail
 	woke    bool // the pause before the last round ended on relay wait's "ready"
+	probing bool // offline past OfflineGrace: the pause is OfflineProbe, cut short by a wake
 }
 
 // after records outcome o, which ended at now, and returns how long to wait
@@ -114,9 +115,12 @@ func (d *direction) after(o round.Outcome, now time.Time, jitter func(time.Durat
 		d.fail(o, now, jitter)
 		wait = min(jitter(backoff(d.poll, st.ConsecutiveFailures, OfflineCap)), OfflineCap)
 	case round.Auth:
+		// Only a person can fix it (ssh HOST once, a key, a host key), and
+		// every retry reaches the far side's login again: the link stops
+		// until a resume (see Link.turn).
 		d.drained = 0
 		d.fail(o, now, jitter)
-		wait = AuthProbe
+		return 0
 	case round.NeedsHuman, round.Stopped:
 		d.drained = 0
 		return 0 // the link stops this direction; nothing is scheduled

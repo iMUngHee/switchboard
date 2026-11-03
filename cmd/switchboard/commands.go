@@ -87,8 +87,11 @@ func describe(name string, o round.Outcome) string {
 	if !o.NotBefore.IsZero() {
 		s += ", next not before " + o.NotBefore.Local().Format(time.DateTime)
 	}
-	if o.Class == round.NeedsHuman {
+	switch o.Class {
+	case round.NeedsHuman:
 		s += fmt.Sprintf("; fix the cause, then run `switchboard resume %s`", name)
+	case round.Auth:
+		s += fmt.Sprintf("; the link is stopped so ssh is not tried again: fix that, then run `switchboard resume %s`", name)
 	}
 	return s
 }

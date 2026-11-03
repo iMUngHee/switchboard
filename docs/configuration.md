@@ -114,7 +114,9 @@ there. `env` is set for that program.
 replaced inside its words; it gets nothing a relay stage printed. Without it,
 macOS shows a notification, Linux uses `notify-send` when it is installed, and
 Windows writes to the log. The states are `auth`, `offline`, `degraded`,
-`needs-human`, and `ok` when the link works again.
+`needs-human`, and `ok` when the link works again. After `auth` the link stops
+until `switchboard resume`; after `offline` it is tried every 30 minutes, and at
+once when the machine wakes.
 
 ## State and logs
 

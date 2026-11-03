@@ -79,9 +79,9 @@ type Link struct {
 	jitter   func(time.Duration) time.Duration
 	runRound func(ctx context.Context, e *round.Engine, d round.Direction, in round.Input) round.Outcome
 	runWait  func(ctx context.Context, d *direction) waitAnswer // nil: never wait for mail, only poll
-	// awaitEvery is how often a wait for mail looks at the clock and the
-	// link's stop mark; zero means maxSleep.
-	awaitEvery time.Duration
+	// tick is how often a pause (sleep or a wait for mail) looks at the
+	// clock and the link's stop mark; zero means maxSleep.
+	tick time.Duration
 	// waitFor is what relay wait is asked to wait; zero means WaitTimeout.
 	waitFor time.Duration
 }
@@ -257,10 +257,7 @@ func (l *Link) await(ctx context.Context, i int, d *direction) bool {
 	started, wallStarted := time.Now(), l.now()
 	go func() { answer <- l.runWait(wctx, d) }()
 	end := func() { cancel(); <-answer }
-	every := l.awaitEvery
-	if every <= 0 {
-		every = maxSleep
-	}
+	every := l.every()
 	for {
 		expect := l.now().Add(every)
 		t := time.NewTimer(every)
@@ -333,6 +330,14 @@ func (l *Link) answered(ctx context.Context, i int, d *direction, a waitAnswer) 
 	return l.sleep(ctx, i, d.poll)
 }
 
+// every is how often a pause looks at the clock: tick, or maxSleep.
+func (l *Link) every() time.Duration {
+	if l.tick > 0 {
+		return l.tick
+	}
+	return maxSleep
+}
+
 // relayWait runs relay wait on d's From side for WaitTimeout.
 func (l *Link) relayWait(ctx context.Context, d *direction) waitAnswer {
 	r := pagercli.Runner{Timeout: l.waitTimeout() + waitSlack, StdoutCap: 1 << 10}
@@ -385,16 +390,22 @@ func (l *Link) sleep(ctx context.Context, i int, wait time.Duration) bool {
 		} else if rem <= 0 {
 			return true
 		}
-		step := min(rem, maxSleep)
+		step := min(rem, l.every())
 		expect := l.now().Add(step)
 		t := time.NewTimer(step)
 		select {
 		case <-t.C:
 			// A timer that fired far later than set slept with the machine.
+			// A long wait for an unreachable far side ends then: a laptop
+			// that wakes has usually just found its network again.
 			if now := l.now(); now.Sub(expect) > time.Minute {
 				l.mu.Lock()
 				l.awake = now
+				probing := l.dirs[i] != nil && l.dirs[i].probing
 				l.mu.Unlock()
+				if probing {
+					return true
+				}
 			}
 		case <-l.wake[i]:
 			t.Stop()
@@ -460,8 +471,17 @@ func (l *Link) turn(stop, roundCtx context.Context, d *direction) (time.Duration
 	}
 	now := l.now()
 	wait := d.after(o, now, l.jitter)
-	if o.Class == round.NeedsHuman {
+	if o.Class == round.NeedsHuman || o.Class == round.Auth {
 		l.st.NeedsHuman = true
+	}
+	// Told it is offline by now, so try it rarely: a retry every 30 seconds
+	// for hours helps no one. Waking the machine ends the wait (see sleep).
+	d.probing = o.Class == round.Offline && l.dirHealth(d, now) == Offline
+	if d.probing {
+		wait = l.jitter(OfflineProbe)
+		// Not stored: a restart tries once at start, and status shows no
+		// next time rather than the 30-second backoff's, long past.
+		d.st.NotBefore = time.Time{}
 	}
 	l.save()
 	h, changed := l.health(now)
@@ -537,6 +557,9 @@ func (l *Link) Resume() {
 		d.endStreak()
 		d.isDegraded = false
 	}
+	// Nothing has been told since the resume, so the next round's health is
+	// told whatever it is: the same cause again, or that the link works.
+	l.notified = ""
 	l.save()
 	l.mu.Unlock()
 	l.opt.Log.Info("link resumed", "link", l.opt.Name)

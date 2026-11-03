@@ -35,9 +35,12 @@ switchboard service install
   ssh connects again by itself. With one that needs a touch or a passphrase,
   or a jump host that asks for one, batch-mode ssh fails until a person runs
   `ssh vm.example.com` once. switchboard waits ten minutes after waking before
-  it says the far side is offline, then shows the link's hint; if ssh says the
-  key or host key is the problem, it says so at once. Nothing is lost
-  meanwhile: mail waits on its sender until a round carries it.
+  it says the far side is offline, then shows the link's hint, and from then on
+  tries it every 30 minutes, and at once whenever the laptop wakes. If ssh says
+  the key or host key is the problem, it says so at once and stops trying, since
+  every try would knock on the far side's login again: run `ssh vm.example.com`
+  once, then `switchboard resume vm`. Nothing is lost meanwhile: mail waits on
+  its sender until a round carries it.
 
 ## A dual-boot desktop and a Raspberry Pi
 
