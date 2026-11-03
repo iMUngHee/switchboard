@@ -24,6 +24,10 @@ func unlockFile(f *os.File) error {
 	return unix.Flock(int(f.Fd()), unix.LOCK_UN)
 }
 
+// readFile reads a state file. Unix lets a rename replace a file another
+// process has open, so nothing is retried here.
+func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
+
 // replace renames from over to, then syncs the directory so the rename
 // itself is on disk.
 func replace(from, to string) error {

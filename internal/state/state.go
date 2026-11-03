@@ -95,7 +95,7 @@ func Load(stateDir, key string) (Link, error) {
 		return Link{}, err
 	}
 	path := statePath(stateDir, key)
-	data, err := os.ReadFile(path)
+	data, err := readFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return Link{}, nil
 	}
