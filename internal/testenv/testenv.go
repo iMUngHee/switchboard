@@ -57,10 +57,22 @@ func Pager(t testing.TB) string {
 		if _, err := os.Stat(pagerPath); err == nil {
 			return
 		}
+		// Installed into a directory of its own, then renamed, as TestPager
+		// is: test processes for several packages may install it at once,
+		// and one must never run the binary while another is still writing
+		// it (on Windows that fails as a sharing violation).
+		tmp := filepath.Join(dir, fmt.Sprintf("build-%d", os.Getpid()))
+		defer os.RemoveAll(tmp)
 		cmd := exec.Command("go", "install", "github.com/iMUngHee/pager/cmd/pager@"+PagerVersion)
-		cmd.Env = append(os.Environ(), "GOBIN="+dir, "CGO_ENABLED=0", "GOFLAGS=-mod=mod")
+		cmd.Env = append(os.Environ(), "GOBIN="+tmp, "CGO_ENABLED=0", "GOFLAGS=-mod=mod")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			pagerErr = &buildError{what: "pager " + PagerVersion[:12], err: err, out: out}
+			return
+		}
+		if err := os.Rename(filepath.Join(tmp, exe("pager")), pagerPath); err != nil {
+			if _, statErr := os.Stat(pagerPath); statErr != nil {
+				pagerErr = err
+			}
 		}
 	})
 	if pagerErr != nil {
