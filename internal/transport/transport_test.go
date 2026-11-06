@@ -54,6 +54,24 @@ func TestSSHArgv(t *testing.T) {
 		}
 	})
 
+	t.Run("ssh -G gets the round's options and no remote command", func(t *testing.T) {
+		c := base.ConfigCommand()
+		want := []string{
+			"-o", "ServerAliveInterval=5", "-i", "/home/me/.ssh/relay",
+			"-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+			"-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+			"-G", "--", "vm.example.com",
+		}
+		if c.Path != base.SSH || !slices.Equal(c.Args, want) {
+			t.Fatalf("ssh -G\n got %q %q\nwant %q", c.Path, c.Args, want)
+		}
+		w := base
+		w.Windows = true
+		if joined := strings.Join(w.ConfigCommand().Args, " "); !strings.Contains(joined, "-o ControlMaster=no -o ControlPath=none -G -- vm.example.com") {
+			t.Fatalf("windows ssh -G lacks the ControlMaster override the rounds get: %q", joined)
+		}
+	})
+
 	t.Run("validation", func(t *testing.T) {
 		for name, mut := range map[string]func(*SSHEndpoint){
 			"relative ssh":       func(s *SSHEndpoint) { s.SSH = "ssh" },
@@ -94,6 +112,25 @@ func TestSSHArgv(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestControlPath reads the control socket from ssh -G's output: the first
+// controlpath line, as ssh printed it, and none means there is none.
+func TestControlPath(t *testing.T) {
+	for _, tc := range []struct{ name, config, want string }{
+		{"expanded", "user me\nhostname vm.example.com\ncontrolmaster auto\ncontrolpath /home/me/.ssh/cm/d66e11c2\nbatchmode yes\n", "/home/me/.ssh/cm/d66e11c2"},
+		{"crlf", "hostname vm.example.com\r\ncontrolpath /tmp/cm/x\r\n", "/tmp/cm/x"},
+		{"a key in other case", "ControlPath /tmp/cm/x\n", "/tmp/cm/x"},
+		{"a path with a space", "controlpath /Users/me/Library/Application Support/cm/x\n", "/Users/me/Library/Application Support/cm/x"},
+		{"none", "controlmaster auto\ncontrolpath none\n", ""},
+		{"absent", "user me\ncontrolmaster auto\ncontrolpersist 600\n", ""},
+		{"another key that starts the same", "controlpathx /tmp/no\n", ""},
+		{"empty", "", ""},
+	} {
+		if got := ControlPath([]byte(tc.config)); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
+	}
 }
 
 func TestLocalEndpointOwnsPagerDB(t *testing.T) {

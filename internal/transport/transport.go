@@ -137,6 +137,34 @@ func (s SSHEndpoint) Command(args ...string) Command {
 	return Command{Path: s.SSH, Args: argv, Env: os.Environ()}
 }
 
+// ConfigCommand is `ssh -G` with the options a round's ssh gets: it prints the
+// configuration ssh would connect with, after its Host and Match blocks, and
+// exits without connecting.
+func (s SSHEndpoint) ConfigCommand() Command {
+	argv := append([]string{}, s.Options...)
+	argv = append(argv, presetOptions...)
+	if s.Windows {
+		argv = append(argv, windowsOptions...)
+	}
+	argv = append(argv, "-G", "--", s.Host)
+	return Command{Path: s.SSH, Args: argv, Env: os.Environ()}
+}
+
+// ControlPath is the control socket in what ConfigCommand printed, expanded as
+// ssh expands it, or "" when there is none.
+func ControlPath(config []byte) string {
+	for line := range strings.Lines(string(config)) {
+		k, v, _ := strings.Cut(strings.TrimRight(line, "\r\n"), " ")
+		if strings.EqualFold(k, "controlpath") {
+			if strings.EqualFold(v, "none") {
+				return ""
+			}
+			return v
+		}
+	}
+	return ""
+}
+
 // remoteCommand joins the remote pager and its arguments into the one string
 // ssh hands to the remote shell. ValidateSSH guarantees the path, and every
 // argument pager is given here is fixed text, a validated peer name or a

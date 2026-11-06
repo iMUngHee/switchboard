@@ -84,6 +84,9 @@ name a peer other than the one pager lists.
   waiting_since and no_wait_until).
 - `hint` is what to do when the link needs you. For an ssh link it defaults to
   running `ssh HOST` once, which is what a laptop needs after a night's sleep.
+  When that login leaves a ControlMaster up, a link stopped over ssh's
+  credentials resumes by itself (see the laptop in
+  [scenarios.md](scenarios.md)).
 
 ### [link.NAME.ssh]
 
@@ -115,8 +118,8 @@ replaced inside its words; it gets nothing a relay stage printed. Without it,
 macOS shows a notification, Linux uses `notify-send` when it is installed, and
 Windows writes to the log. The states are `auth`, `offline`, `degraded`,
 `needs-human`, and `ok` when the link works again. After `auth` the link stops
-until `switchboard resume`; after `offline` it is tried every 30 minutes, and at
-once when the machine wakes.
+until `switchboard resume`, or until a login leaves a ControlMaster up; after
+`offline` it is tried every 30 minutes, and at once when the machine wakes.
 
 ## State and logs
 

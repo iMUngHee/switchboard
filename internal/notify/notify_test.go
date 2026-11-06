@@ -105,7 +105,7 @@ func TestNotifyPayloadAndTransitions(t *testing.T) {
 	t.Run("every health reads as a sentence; the hint only when there is something to do", func(t *testing.T) {
 		for h, want := range map[link.Health]string{
 			link.NeedsHuman: "switchboard resume vm",
-			link.Auth:       "ssh needs a key loaded or a host key accepted; switchboard stopped trying until `switchboard resume vm`.",
+			link.Auth:       "ssh needs a key loaded or a host key accepted; switchboard stopped trying until it can share the connection a login opens, or `switchboard resume vm`.",
 			link.Offline:    "has not answered for 10 minutes",
 			link.Degraded:   "still retrying",
 			link.Healthy:    "works again",

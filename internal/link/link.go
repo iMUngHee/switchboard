@@ -74,6 +74,14 @@ type Link struct {
 	notifyMu sync.Mutex
 	sentSeq  uint64
 
+	// controlPath asks ssh where a master for the far side listens (see
+	// watchLogin); nil when the far side is not reached with ssh, or with no
+	// connection sharing. resumedFor is the master's socket the link last
+	// resumed for; l.mu guards it.
+	controlPath func(ctx context.Context) string
+	resumedFor  os.FileInfo
+	resumes     uint64 // how many resumes this process made, which tells one stop from the next
+
 	// Seams for tests.
 	now      func() time.Time
 	jitter   func(time.Duration) time.Duration
@@ -84,6 +92,8 @@ type Link struct {
 	tick time.Duration
 	// waitFor is what relay wait is asked to wait; zero means WaitTimeout.
 	waitFor time.Duration
+	// loginEvery is how often watchLogin looks; zero means LoginWatch.
+	loginEvery time.Duration
 }
 
 // waitAnswer is what one relay wait came to.
@@ -150,6 +160,9 @@ func Open(ctx context.Context, opt Options) (*Link, error) {
 			return e.Run(ctx, d, in)
 		}}
 	l.runWait = l.relayWait
+	if s, ok := far.(transport.SSHEndpoint); ok && !s.Windows {
+		l.controlPath = func(ctx context.Context) string { return sshControlPath(ctx, s) }
+	}
 	l.awake = l.now()
 	cfg := opt.Config
 	l.dirs[0] = &direction{name: "outbound", poll: cfg.PollOutbound, st: &l.st.Outbound,
@@ -185,6 +198,7 @@ func (l *Link) Run(ctx context.Context) {
 	for i, d := range l.dirs {
 		wg.Go(func() { l.loop(ctx, roundCtx, i, d) })
 	}
+	wg.Go(func() { l.watchLogin(ctx) })
 	l.control(ctx)
 	wg.Wait()
 }
@@ -551,6 +565,16 @@ func (l *Link) control(ctx context.Context) {
 // directions at once.
 func (l *Link) Resume() {
 	l.mu.Lock()
+	l.resume()
+	l.mu.Unlock()
+	l.opt.Log.Info("link resumed", "link", l.opt.Name)
+	l.wakeAll()
+}
+
+// resume is Resume's change to the link, without the wake-up. The caller
+// holds l.mu.
+func (l *Link) resume() {
+	l.resumes++
 	l.st.Resume()
 	for _, d := range l.dirs {
 		d.reruns, d.drained = 0, 0
@@ -561,9 +585,6 @@ func (l *Link) Resume() {
 	// told whatever it is: the same cause again, or that the link works.
 	l.notified = ""
 	l.save()
-	l.mu.Unlock()
-	l.opt.Log.Info("link resumed", "link", l.opt.Name)
-	l.wakeAll()
 }
 
 func (l *Link) wakeAll() {

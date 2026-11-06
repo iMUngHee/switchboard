@@ -249,3 +249,40 @@ func TestAuthStopsTheLink(t *testing.T) {
 		t.Fatalf("after resume: runs %d, outcome %s", runs, o.Class)
 	}
 }
+
+// TestResumeToldOnceTheStopRan: after a resume, the direction that stopped
+// the link has not run yet, so what it stopped over says nothing about the
+// link: the other direction working first tells nothing, and the link's
+// health is told once the stopped one has run, whichever way it went.
+func TestResumeToldOnceTheStopRan(t *testing.T) {
+	refused := round.Outcome{Class: round.NeedsHuman, Code: "refused", Stage: round.StageIn}
+	for _, tc := range []struct {
+		name       string
+		stop       round.Outcome
+		afterwards round.Outcome
+		want       Health
+	}{
+		{"auth, fixed", auth, idle, Healthy},
+		{"auth, not fixed", auth, auth, Auth},
+		{"needs-human, fixed", refused, idle, Healthy},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l, rec := testLink(t, newClock(), idle, tc.stop, idle, tc.afterwards)
+			l.step(t.Context(), l.dirs[0])
+			l.step(t.Context(), l.dirs[1])
+			if !l.stopped() {
+				t.Fatal("the link did not stop")
+			}
+			told := len(rec.all())
+			l.Resume()
+			l.step(t.Context(), l.dirs[0])
+			if notes := rec.all(); len(notes) != told {
+				t.Fatalf("told %+v before the stopped direction ran", notes[told:])
+			}
+			l.step(t.Context(), l.dirs[1])
+			if notes := rec.all(); len(notes) != told+1 || notes[told].health != tc.want {
+				t.Fatalf("notes after the stopped direction ran %+v, want %s", notes[told:], tc.want)
+			}
+		})
+	}
+}

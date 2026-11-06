@@ -50,7 +50,7 @@ func (m Message) Body() string {
 	case link.NeedsHuman:
 		s = "stopped; it needs you, then `switchboard resume " + m.Link + "`."
 	case link.Auth:
-		s = "ssh needs a key loaded or a host key accepted; switchboard stopped trying until `switchboard resume " + m.Link + "`."
+		s = "ssh needs a key loaded or a host key accepted; switchboard stopped trying until it can share the connection a login opens, or `switchboard resume " + m.Link + "`."
 	case link.Offline:
 		s = "the far side has not answered for 10 minutes."
 	case link.Degraded:

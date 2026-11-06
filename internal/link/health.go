@@ -39,6 +39,14 @@ func (l *Link) health(now time.Time) (Health, bool) {
 		}
 	} else {
 		for _, d := range l.dirs {
+			if c := round.Class(d.st.Class); c == round.Auth || c == round.NeedsHuman {
+				// What stopped the link, from before a resume: that direction
+				// has not run since. Told now, the health would repeat the
+				// stop's cause, or call the link fixed, before it says which.
+				return l.notified, false
+			}
+		}
+		for _, d := range l.dirs {
 			if dh := l.dirHealth(d, now); healthRank[dh] > healthRank[h] {
 				h = dh
 			}
