@@ -133,6 +133,79 @@ func TestControlPath(t *testing.T) {
 	}
 }
 
+// TestJumps reads the ProxyJump from ssh -G's output, a hop at a time, each
+// with the hops before it; one hop outside the safe set drops them all.
+func TestJumps(t *testing.T) {
+	for _, tc := range []struct {
+		name, config string
+		want         []Jump
+	}{
+		{"one alias", "hostname vm.example.com\nproxyjump jump\n", []Jump{{Host: "jump"}}},
+		{"user and port", "proxyjump me@jump.example.com:2222\n", []Jump{{User: "me", Host: "jump.example.com", Port: "2222"}}},
+		{"two hops", "proxyjump me@a.example.com:2200,b.example.com\n", []Jump{
+			{User: "me", Host: "a.example.com", Port: "2200"},
+			{Host: "b.example.com", Via: "me@a.example.com:2200"},
+		}},
+		{"three hops", "proxyjump a,b,c\n", []Jump{{Host: "a"}, {Host: "b", Via: "a"}, {Host: "c", Via: "a,b"}}},
+		{"a uri", "proxyjump ssh://me@a.example.com:2200\n", []Jump{{User: "me", Host: "a.example.com", Port: "2200"}}},
+		{"ipv6, kept bare", "proxyjump me@[2001:db8::1]:22\n", []Jump{{User: "me", Host: "2001:db8::1", Port: "22"}}},
+		{"a numeric hop as ssh -G prints it", "proxyjump [192.0.2.10]\n", []Jump{{Host: "192.0.2.10"}}},
+		{"an ipv6 hop before another", "proxyjump me@[2001:db8::5]:2222,b\n", []Jump{
+			{User: "me", Host: "2001:db8::5", Port: "2222"},
+			{Host: "b", Via: "me@[2001:db8::5]:2222"},
+		}},
+		{"a bracket of other characters", "proxyjump [g::1]\n", nil},
+		{"something after the bracket", "proxyjump [::1]x\n", nil},
+		{"crlf", "proxyjump jump\r\n", []Jump{{Host: "jump"}}},
+		{"none", "proxyjump none\n", nil},
+		{"absent", "hostname vm.example.com\ncontrolpath /tmp/cm/x\n", nil},
+		{"an option for a host", "proxyjump -oProxyCommand=evil\n", nil},
+		{"a shell character", "proxyjump a;id\n", nil},
+		{"two @", "proxyjump a@b@c\n", nil},
+		{"a user with a quote", "proxyjump m'e@jump\n", nil},
+		{"a port that is not one", "proxyjump jump:22x\n", nil},
+		{"an unclosed bracket", "proxyjump [2001:db8::1\n", nil},
+		{"one bad hop of two", "proxyjump good.example.com,-bad\n", nil},
+		{"an empty hop", "proxyjump a,,b\n", nil},
+	} {
+		if got := Jumps([]byte(tc.config)); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestJumpConfigCommand: a hop's ssh -G gets what ssh gives its own command
+// for the hop, -F from the round's options, -l, -p and the hops before it
+// with -J, and nothing else of the round's.
+func TestJumpConfigCommand(t *testing.T) {
+	s := SSHEndpoint{SSH: localBin("ssh"), Host: "vm.example.com", Pager: "/home/me/.local/bin/pager"}
+	for _, tc := range []struct {
+		name    string
+		options []string
+		jump    Jump
+		want    []string
+	}{
+		{"a bare hop", nil, Jump{Host: "jump"}, []string{"-G", "--", "jump"}},
+		{"everything", []string{"-o", "ServerAliveInterval=5", "-F", "/home/me/.ssh/relay_config", "-i", "/home/me/.ssh/relay"},
+			Jump{User: "me", Host: "b.example.com", Port: "2222", Via: "a.example.com"},
+			[]string{"-F", "/home/me/.ssh/relay_config", "-l", "me", "-p", "2222", "-J", "a.example.com", "-G", "--", "b.example.com"}},
+		{"-F joined, the last one wins", []string{"-F/etc/a", "-F", "/etc/b"}, Jump{Host: "jump"}, []string{"-F", "/etc/b", "-G", "--", "jump"}},
+		{"-F as another option's value", []string{"-o", "-F", "-i", "/home/me/.ssh/relay"}, Jump{Host: "jump"}, []string{"-G", "--", "jump"}},
+		{"-F with nothing after it", []string{"-F"}, Jump{Host: "jump"}, []string{"-G", "--", "jump"}},
+		{"-F clustered after a flag", []string{"-qF", "/etc/c"}, Jump{Host: "jump"}, []string{"-F", "/etc/c", "-G", "--", "jump"}},
+		{"-F clustered and joined", []string{"-4F/etc/d"}, Jump{Host: "jump"}, []string{"-F", "/etc/d", "-G", "--", "jump"}},
+		{"-F as a clustered option's value", []string{"-vo", "-F"}, Jump{Host: "jump"}, []string{"-G", "--", "jump"}},
+		{"an option with its value joined", []string{"-oUserKnownHostsFile=/dev/null", "-oForwardAgent=no"}, Jump{Host: "jump"}, []string{"-G", "--", "jump"}},
+		{"an ipv6 hop, bare", nil, Jump{Host: "2001:db8::5", Port: "2222"}, []string{"-p", "2222", "-G", "--", "2001:db8::5"}},
+	} {
+		s.Options = tc.options
+		c := s.JumpConfigCommand(tc.jump)
+		if c.Path != s.SSH || !slices.Equal(c.Args, tc.want) {
+			t.Errorf("%s:\n got %q %q\nwant %q", tc.name, c.Path, c.Args, tc.want)
+		}
+	}
+}
+
 func TestLocalEndpointOwnsPagerDB(t *testing.T) {
 	t.Setenv("PAGER_DB", "/tmp/inherited.db")
 	envOf := func(c Command, key string) []string {

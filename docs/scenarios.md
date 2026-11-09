@@ -39,13 +39,17 @@ switchboard service install
   tries it every 30 minutes, and at once whenever the laptop wakes. If ssh says
   the key or host key is the problem, it says so at once and stops trying, since
   every try would knock on the far side's login again: run `ssh vm.example.com`
-  once. With a ControlMaster, that is all: switchboard asks `ssh -G` once for
-  the host's ControlPath, then every 30 seconds looks for a master listening on
-  that socket, which reaches nothing beyond the laptop, and resumes the link
-  when it finds a new one. `ssh -G` does not connect, but it evaluates your
-  ssh_config as any ssh does, a `Match exec` included. Without a ControlMaster,
-  or on Windows, run `switchboard resume vm` too. Nothing is lost meanwhile:
-  mail waits on its sender until a round carries it.
+  once. With a ControlMaster, for the host or for a jump host its ProxyJump
+  goes through, that is all: once per stop, switchboard runs `ssh -G` for the
+  host and for each hop of its ProxyJump, the way ssh's own command for that
+  hop would run, to find their ControlPaths, then every 30 seconds looks for a
+  master listening on those sockets, which reaches nothing beyond the laptop,
+  and resumes the link when it finds a new one. `ssh -G` does not connect, but
+  it evaluates your ssh_config as any ssh does, a `Match exec` included. A
+  hop's own ProxyJump, and a jump made with ProxyCommand, are not followed.
+  Without a ControlMaster, or on Windows, run `switchboard resume vm` too.
+  Nothing is lost meanwhile: mail waits on its sender until a round carries
+  it.
 
 ## A dual-boot desktop and a Raspberry Pi
 

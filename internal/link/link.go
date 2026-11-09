@@ -74,13 +74,13 @@ type Link struct {
 	notifyMu sync.Mutex
 	sentSeq  uint64
 
-	// controlPath asks ssh where a master for the far side listens (see
-	// watchLogin); nil when the far side is not reached with ssh, or with no
-	// connection sharing. resumedFor is the master's socket the link last
-	// resumed for; l.mu guards it.
-	controlPath func(ctx context.Context) string
-	resumedFor  os.FileInfo
-	resumes     uint64 // how many resumes this process made, which tells one stop from the next
+	// controlPaths asks ssh where a master for the way to the far side
+	// listens (see watchLogin); nil when the far side is not reached with
+	// ssh, or with no connection sharing. resumedFor is the masters' sockets
+	// the link resumed for; l.mu guards it.
+	controlPaths func(ctx context.Context) []string
+	resumedFor   []os.FileInfo
+	resumes      uint64 // how many resumes this process made, which tells one stop from the next
 
 	// Seams for tests.
 	now      func() time.Time
@@ -161,7 +161,7 @@ func Open(ctx context.Context, opt Options) (*Link, error) {
 		}}
 	l.runWait = l.relayWait
 	if s, ok := far.(transport.SSHEndpoint); ok && !s.Windows {
-		l.controlPath = func(ctx context.Context) string { return sshControlPath(ctx, s) }
+		l.controlPaths = func(ctx context.Context) []string { return sshControlPaths(ctx, s, masterCheck) }
 	}
 	l.awake = l.now()
 	cfg := opt.Config

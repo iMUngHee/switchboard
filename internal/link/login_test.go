@@ -129,9 +129,54 @@ func TestResumeOnLogin(t *testing.T) {
 			l.step(t.Context(), l.dirs[0])
 			wasStopped := l.stopped()
 			l.resumeOnLogin(socketFile(t, t.TempDir(), "m"))
-			if l.stopped() != wasStopped || l.resumedFor != nil {
+			if l.stopped() != wasStopped || len(l.resumedFor) != 0 {
 				t.Fatalf("after %s: stopped %v, was %v, resumedFor %v", o.Class, l.stopped(), wasStopped, l.resumedFor)
 			}
+		}
+	})
+
+	t.Run("two masters do not take turns", func(t *testing.T) {
+		l, _ := testLink(t, newClock())
+		l.runRound = always(auth)
+		dir := t.TempDir()
+		a, b := socketFile(t, dir, "a"), socketFile(t, dir, "b")
+		for i, m := range []os.FileInfo{a, b} {
+			l.step(t.Context(), l.dirs[1])
+			l.resumeOnLogin(m)
+			if l.stopped() {
+				t.Fatalf("master %d did not resume the link", i)
+			}
+		}
+		l.step(t.Context(), l.dirs[1])
+		for i, m := range []os.FileInfo{a, b, a} {
+			if l.resumeOnLogin(m); !l.stopped() {
+				t.Fatalf("look %d: a master resumed the link a second time", i)
+			}
+		}
+	})
+
+	t.Run("the oldest master is forgotten first", func(t *testing.T) {
+		l, _ := testLink(t, newClock())
+		l.runRound = always(auth)
+		dir := t.TempDir()
+		var ms []os.FileInfo
+		for i := range maxResumedFor + 1 {
+			m := socketFile(t, dir, strconv.Itoa(i))
+			ms = append(ms, m)
+			l.step(t.Context(), l.dirs[1])
+			l.resumeOnLogin(m)
+		}
+		if len(l.resumedFor) != maxResumedFor {
+			t.Fatalf("%d masters remembered, want %d", len(l.resumedFor), maxResumedFor)
+		}
+		l.step(t.Context(), l.dirs[1])
+		for _, m := range []os.FileInfo{ms[1], ms[maxResumedFor]} {
+			if l.resumeOnLogin(m); !l.stopped() {
+				t.Fatal("a remembered master resumed the link again")
+			}
+		}
+		if l.resumeOnLogin(ms[0]); l.stopped() {
+			t.Fatal("the forgotten master did not resume the link")
 		}
 	})
 }
@@ -194,13 +239,9 @@ func TestRunWatchesForALogin(t *testing.T) {
 		return hostKey
 	}
 	var asked atomic.Int32
-	var unbounded atomic.Bool
-	l.controlPath = func(ctx context.Context) string {
+	l.controlPaths = func(context.Context) []string {
 		asked.Add(1)
-		if d, ok := ctx.Deadline(); !ok || time.Until(d) > masterCheck {
-			unbounded.Store(true)
-		}
-		return sock
+		return []string{filepath.Join(filepath.Dir(sock), "none"), sock}
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
@@ -252,9 +293,6 @@ func TestRunWatchesForALogin(t *testing.T) {
 	loggedIn.Store(true)
 	listenAt(t, sock)
 	waitFor(t, "a new master to resume the link", func() bool { return !l.stopped() })
-	if unbounded.Load() {
-		t.Fatalf("ssh -G was asked without a deadline of %v at most", masterCheck)
-	}
 }
 
 // shortDir is a temporary directory short enough for a socket in it:
@@ -279,75 +317,137 @@ func listenAt(t *testing.T, path string) net.Listener {
 	return ln
 }
 
-// TestSSHControlPath: the ControlPath is what ssh -G prints, run with the
-// round's options and nothing else; an ssh -G that fails or hangs names none.
-func TestSSHControlPath(t *testing.T) {
+// TestSSHControlPaths: the ControlPaths are what ssh -G prints for the host,
+// run with the round's options, then for each ProxyJump hop, asked as ssh
+// asks for that hop; an ssh -G that fails or hangs adds none.
+func TestSSHControlPaths(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows OpenSSH has no ControlMaster, so no link asks for one")
 	}
 	dir := shortDir(t)
 	argsFile := filepath.Join(dir, "args")
-	// fakeSSH records its arguments, then prints config as ssh -G would.
-	fakeSSH := func(t *testing.T, config string, exit int, hang bool) transport.SSHEndpoint {
+	// fakeSSH records its arguments, a call a line, then prints as ssh -G
+	// would the config given for the destination, its last argument, and
+	// exits 1 after it when that config starts with "!". A destination given
+	// none fails; the one named hang hangs first.
+	fakeSSH := func(t *testing.T, configs map[string]string, hang string) transport.SSHEndpoint {
 		t.Helper()
-		cfg := filepath.Join(dir, "config")
-		if err := os.WriteFile(cfg, []byte(config), 0o600); err != nil {
-			t.Fatal(err)
+		os.Remove(argsFile)
+		script := "#!/bin/sh\nfor a; do last=$a; done\necho \"$*\" >> '" + argsFile + "'\n"
+		script += "if [ \"$last\" = '" + hang + "' ]; then sleep 30; fi\ncase \"$last\" in\n"
+		i := 0
+		for dest, config := range configs {
+			f := filepath.Join(dir, "config"+strconv.Itoa(i))
+			i++
+			config, fail := strings.CutPrefix(config, "!")
+			if err := os.WriteFile(f, []byte(config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			script += "'" + dest + "') cat '" + f + "'"
+			if fail {
+				script += "; exit 1"
+			}
+			script += ";;\n"
 		}
-		script := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '" + argsFile + "'\n"
-		if hang {
-			script += "sleep 30\n"
-		}
-		script += "cat '" + cfg + "'\nexit " + strconv.Itoa(exit) + "\n"
+		script += "*) exit 1;;\nesac\n"
 		p := filepath.Join(dir, "ssh")
 		if err := os.WriteFile(p, []byte(script), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		return transport.SSHEndpoint{SSH: p, Host: "vm.example.com", Pager: "/usr/local/bin/pager", Options: []string{"-F", "/dev/null"}}
+		return transport.SSHEndpoint{SSH: p, Host: "vm.example.com", Pager: "/usr/local/bin/pager", Options: []string{"-F", "/dev/null", "-o", "ServerAliveInterval=5"}}
 	}
-	config := "user me\nhostname vm.example.com\ncontrolmaster auto\ncontrolpath /tmp/cm/x\nbatchmode yes\n"
-
-	t.Run("names the path ssh -G prints", func(t *testing.T) {
-		if got := sshControlPath(t.Context(), fakeSSH(t, config, 0, false)); got != "/tmp/cm/x" {
-			t.Fatalf("path %q", got)
-		}
+	calls := func(t *testing.T) []string {
+		t.Helper()
 		data, err := os.ReadFile(argsFile)
 		if err != nil {
 			t.Fatal(err)
 		}
-		got := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
-		want := []string{"-F", "/dev/null", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-G", "--", "vm.example.com"}
-		if !slices.Equal(got, want) {
-			t.Fatalf("ssh ran with %q, want %q", got, want)
+		return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	}
+	const hostCall = "-F /dev/null -o ServerAliveInterval=5 -T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -G -- vm.example.com"
+
+	t.Run("the host's own", func(t *testing.T) {
+		s := fakeSSH(t, map[string]string{"vm.example.com": "user me\ncontrolmaster auto\ncontrolpath /tmp/cm/vm\n"}, "")
+		if got := sshControlPaths(t.Context(), s, masterCheck); !slices.Equal(got, []string{"/tmp/cm/vm"}) {
+			t.Fatalf("paths %q", got)
+		}
+		if got := calls(t); !slices.Equal(got, []string{hostCall}) {
+			t.Fatalf("ssh ran as %q", got)
+		}
+	})
+
+	t.Run("each jump host's, asked as ssh asks for the hop", func(t *testing.T) {
+		s := fakeSSH(t, map[string]string{
+			"vm.example.com": "controlmaster false\nproxyjump me@a.example.com:2200,b.example.com\n",
+			"a.example.com":  "controlpath /tmp/cm/a\n",
+			"b.example.com":  "controlpath /tmp/cm/b\n",
+		}, "")
+		if got := sshControlPaths(t.Context(), s, masterCheck); !slices.Equal(got, []string{"/tmp/cm/a", "/tmp/cm/b"}) {
+			t.Fatalf("paths %q", got)
+		}
+		want := []string{hostCall, "-F /dev/null -l me -p 2200 -G -- a.example.com", "-F /dev/null -J me@a.example.com:2200 -G -- b.example.com"}
+		if got := calls(t); !slices.Equal(got, want) {
+			t.Fatalf("ssh ran as\n %q\nwant %q", got, want)
+		}
+	})
+
+	t.Run("the host's first, each path once", func(t *testing.T) {
+		s := fakeSSH(t, map[string]string{
+			"vm.example.com": "controlpath /tmp/cm/vm\nproxyjump a,b\n",
+			"a":              "controlpath /tmp/cm/a\n",
+			"b":              "controlpath /tmp/cm/vm\n",
+		}, "")
+		if got := sshControlPaths(t.Context(), s, masterCheck); !slices.Equal(got, []string{"/tmp/cm/vm", "/tmp/cm/a"}) {
+			t.Fatalf("paths %q", got)
 		}
 	})
 
 	t.Run("names none", func(t *testing.T) {
 		for _, tc := range []struct {
-			name, config string
-			exit         int
+			name    string
+			configs map[string]string
+			want    []string
 		}{
-			{"no control path", "user me\nhostname vm.example.com\n", 0},
-			{"control path none", "controlpath none\n", 0},
-			{"ssh -G fails", config, 1},
+			{"no control path, no jump", map[string]string{"vm.example.com": "user me\nhostname vm.example.com\n"}, nil},
+			{"control path none", map[string]string{"vm.example.com": "controlpath none\nproxyjump none\n"}, nil},
+			{"ssh -G fails for the host", map[string]string{"a": "controlpath /tmp/cm/a\n"}, nil},
+			{"ssh -G prints, then fails", map[string]string{"vm.example.com": "!controlpath /tmp/cm/vm\n"}, nil},
+			{"a jump host's ssh -G prints, then fails", map[string]string{"vm.example.com": "proxyjump a\n", "a": "!controlpath /tmp/cm/a\n"}, nil},
+			{"jump hosts that fail or name none add nothing", map[string]string{
+				"vm.example.com": "controlpath /tmp/cm/vm\nproxyjump a,b\n",
+				"b":              "controlpath none\n",
+			}, []string{"/tmp/cm/vm"}},
 		} {
-			if got := sshControlPath(t.Context(), fakeSSH(t, tc.config, tc.exit, false)); got != "" {
-				t.Errorf("%s: path %q", tc.name, got)
+			if got := sshControlPaths(t.Context(), fakeSSH(t, tc.configs, ""), masterCheck); !slices.Equal(got, tc.want) {
+				t.Errorf("%s: paths %q, want %q", tc.name, got, tc.want)
 			}
 		}
 	})
 
-	t.Run("a hanging ssh -G names none, at its deadline", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-		defer cancel()
-		start := time.Now()
-		if got := sshControlPath(ctx, fakeSSH(t, config, 0, true)); got != "" {
-			t.Fatalf("path %q", got)
-		}
-		if d := time.Since(start); d > 10*time.Second {
-			t.Fatalf("took %v", d)
-		}
-	})
+	// Each ssh -G has its own time: one that hangs is given up on, and the
+	// next is still asked.
+	for _, tc := range []struct {
+		name, hang string
+		want       []string
+	}{
+		{"a hanging ssh -G names none, in its time", "vm.example.com", nil},
+		{"a hop that hangs does not hold up the next", "a", []string{"/tmp/cm/vm", "/tmp/cm/b"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := fakeSSH(t, map[string]string{
+				"vm.example.com": "controlpath /tmp/cm/vm\nproxyjump a,b\n",
+				"a":              "controlpath /tmp/cm/a\n",
+				"b":              "controlpath /tmp/cm/b\n",
+			}, tc.hang)
+			start := time.Now()
+			if got := sshControlPaths(t.Context(), s, 300*time.Millisecond); !slices.Equal(got, tc.want) {
+				t.Fatalf("paths %q, want %q", got, tc.want)
+			}
+			if d := time.Since(start); d > 10*time.Second {
+				t.Fatalf("took %v", d)
+			}
+		})
+	}
 }
 
 // TestListening: a socket counts while a process listens on it, and not
@@ -377,10 +477,12 @@ func TestListening(t *testing.T) {
 	}
 }
 
-// TestControlPathWithThisSSH: the ssh on PATH names the socket for the host,
-// %C expanded, and a master listening there is found. Nothing is reached:
-// ssh -G reads configuration, here none, for a host that cannot resolve.
-func TestControlPathWithThisSSH(t *testing.T) {
+// TestControlPathsWithThisSSH: the ssh on PATH names the sockets for the
+// host and for each ProxyJump hop, %C expanded with the hop's user, port and
+// the hops before it, and a master listening on one is found. Nothing is
+// reached: ssh -G reads configuration, here the test's own, for hosts that
+// cannot resolve.
+func TestControlPathsWithThisSSH(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows OpenSSH has no ControlMaster, so no link looks for one")
 	}
@@ -389,19 +491,54 @@ func TestControlPathWithThisSSH(t *testing.T) {
 		t.Skip("no ssh on PATH")
 	}
 	dir := shortDir(t)
-	s := transport.SSHEndpoint{SSH: sshPath, Host: "vm.example.invalid", Pager: "/usr/local/bin/pager",
-		Options: []string{"-F", "/dev/null", "-o", "ControlPath=" + dir + "/%C"}}
-	p := sshControlPath(t.Context(), s)
-	if filepath.Dir(p) != dir || strings.Contains(p, "%") {
-		t.Fatalf("ssh -G names %q, want %%C expanded in %s", p, dir)
+	cfg := filepath.Join(dir, "cfg")
+	config := "Host vm.example.invalid\n  ControlPath " + dir + "/v-%C\n  ProxyJump me@a.example.invalid:2200,b.example.invalid\n" +
+		"Host a.example.invalid b.example.invalid\n  ControlPath " + dir + "/j-%C\n" +
+		"Host v4.example.invalid\n  ProxyJump 192.0.2.10\nHost v6.example.invalid\n  ProxyJump [2001:db8::5]:2222\n" +
+		"Host 192.0.2.10 2001:db8::5\n  ControlPath " + dir + "/n-%C\n"
+	if err := os.WriteFile(cfg, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if m, ok := listening(t.Context(), p); ok {
+	s := transport.SSHEndpoint{SSH: sshPath, Host: "vm.example.invalid", Pager: "/usr/local/bin/pager", Options: []string{"-F", cfg}}
+	paths := sshControlPaths(t.Context(), s, masterCheck)
+	if len(paths) != 3 || !strings.HasPrefix(paths[0], dir+"/v-") || !strings.HasPrefix(paths[1], dir+"/j-") || !strings.HasPrefix(paths[2], dir+"/j-") ||
+		paths[1] == paths[2] || strings.Contains(strings.Join(paths, " "), "%") {
+		t.Fatalf("ssh -G names %q, want the host's and two hops', %%C expanded", paths)
+	}
+	// The second hop's ssh is run with -J for the first, which %C hashes in.
+	bare, err := exec.Command(sshPath, "-F", cfg, "-G", "--", "b.example.invalid").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transport.ControlPath(bare) == paths[2] {
+		t.Fatal("the second hop was asked about without the hop before it")
+	}
+	// A numeric hop, which ssh -G prints in brackets, is asked about bare, as
+	// ssh's own command for the hop is given it.
+	for _, tc := range []struct {
+		host string
+		hop  []string
+	}{
+		{"v4.example.invalid", []string{"-G", "--", "192.0.2.10"}},
+		{"v6.example.invalid", []string{"-p", "2222", "-G", "--", "2001:db8::5"}},
+	} {
+		out, err := exec.Command(sshPath, append([]string{"-F", cfg}, tc.hop...)...).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := s
+		n.Host = tc.host
+		if got, want := sshControlPaths(t.Context(), n, masterCheck), transport.ControlPath(out); !slices.Equal(got, []string{want}) || want == "" {
+			t.Fatalf("%s: paths %q, want %q", tc.host, got, want)
+		}
+	}
+	if m, ok := listening(t.Context(), paths[2]); ok {
 		t.Fatalf("found a master before one listens: %v", m)
 	}
-	listenAt(t, p)
-	m, ok := listening(t.Context(), p)
-	if want, err := os.Stat(p); !ok || err != nil || !os.SameFile(m, want) {
-		t.Fatalf("found %v (%v), want the socket at %s", m, ok, p)
+	listenAt(t, paths[2])
+	m, ok := listening(t.Context(), paths[2])
+	if want, err := os.Stat(paths[2]); !ok || err != nil || !os.SameFile(m, want) {
+		t.Fatalf("found %v (%v), want the socket at %s", m, ok, paths[2])
 	}
 }
 
@@ -438,7 +575,7 @@ func TestOpenWatchesSSHLinksOnly(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer l.Close()
-			if got := l.controlPath != nil; got != tc.want {
+			if got := l.controlPaths != nil; got != tc.want {
 				t.Fatalf("looks for a master: %v, want %v", got, tc.want)
 			}
 		})

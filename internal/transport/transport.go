@@ -153,12 +153,158 @@ func (s SSHEndpoint) ConfigCommand() Command {
 // ControlPath is the control socket in what ConfigCommand printed, expanded as
 // ssh expands it, or "" when there is none.
 func ControlPath(config []byte) string {
+	if v := configValue(config, "controlpath"); !strings.EqualFold(v, "none") {
+		return v
+	}
+	return ""
+}
+
+// Jump is one host a ProxyJump goes through. Via is the hops before it, as
+// ssh's own command for this hop gets them with -J; "" for the first.
+type Jump struct {
+	User, Host, Port string
+	Via              string
+}
+
+func (j Jump) String() string {
+	s := j.Host
+	if strings.Contains(s, ":") {
+		s = "[" + s + "]"
+	}
+	if j.User != "" {
+		s = j.User + "@" + s
+	}
+	if j.Port != "" {
+		s += ":" + j.Port
+	}
+	return s
+}
+
+var (
+	safeUser = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	safePort = regexp.MustCompile(`^[0-9]{1,5}$`)
+)
+
+// Jumps is the ProxyJump in what ConfigCommand printed, a Jump per hop in
+// order, or nil when there is none, or when a hop is outside what can be
+// passed to ssh as written: then no hop is followed.
+func Jumps(config []byte) []Jump {
+	v := configValue(config, "proxyjump")
+	if v == "" || strings.EqualFold(v, "none") {
+		return nil
+	}
+	var out []Jump
+	var via []string
+	for _, spec := range strings.Split(v, ",") {
+		j, ok := parseJump(spec)
+		if !ok {
+			return nil
+		}
+		j.Via = strings.Join(via, ",")
+		out = append(out, j)
+		via = append(via, j.String())
+	}
+	return out
+}
+
+// parseJump reads one hop, [ssh://][user@]host[:port], with the host as
+// ValidateHost admits it and the user and port of safe characters only. A
+// bracketed host, as ssh -G prints a numeric one, is kept without its
+// brackets: ssh's own command for the hop is given it bare.
+func parseJump(spec string) (Jump, bool) {
+	s := strings.TrimPrefix(spec, "ssh://")
+	var j Jump
+	if u, rest, ok := strings.Cut(s, "@"); ok {
+		if !safeUser.MatchString(u) {
+			return Jump{}, false
+		}
+		j.User, s = u, rest
+	}
+	if strings.HasPrefix(s, "[") {
+		end := strings.Index(s, "]")
+		if end < 0 {
+			return Jump{}, false
+		}
+		if ValidateHost(s[:end+1]) != nil {
+			return Jump{}, false
+		}
+		j.Host, s = s[1:end], s[end+1:]
+		if s != "" {
+			p, ok := strings.CutPrefix(s, ":")
+			if !ok {
+				return Jump{}, false
+			}
+			j.Port = p
+		}
+	} else {
+		j.Host, j.Port, _ = strings.Cut(s, ":")
+		if strings.Contains(j.Host, "@") || ValidateHost(j.Host) != nil {
+			return Jump{}, false
+		}
+	}
+	if j.Port != "" && !safePort.MatchString(j.Port) {
+		return Jump{}, false
+	}
+	return j, true
+}
+
+// JumpConfigCommand is `ssh -G` for hop j as ssh's own command for that hop
+// is run: ssh gives it -l, -p, -J for the hops before it, and the -F the
+// round's options name, and nothing else of theirs.
+func (s SSHEndpoint) JumpConfigCommand(j Jump) Command {
+	var argv []string
+	if f, ok := configFile(s.Options); ok {
+		argv = append(argv, "-F", f)
+	}
+	if j.User != "" {
+		argv = append(argv, "-l", j.User)
+	}
+	if j.Port != "" {
+		argv = append(argv, "-p", j.Port)
+	}
+	if j.Via != "" {
+		argv = append(argv, "-J", j.Via)
+	}
+	argv = append(argv, "-G", "--", j.Host)
+	return Command{Path: s.SSH, Args: argv, Env: os.Environ()}
+}
+
+// sshArgOptions are ssh's options that take an argument.
+const sshArgOptions = "BbcDEeFIiJLlmOoPpQRSWw"
+
+// configFile is the config file ssh options name with -F, the last one as
+// ssh reads them: flags may be clustered (-qF file), and an option that takes
+// an argument takes the rest of its word or the next one.
+func configFile(opts []string) (string, bool) {
+	f, ok := "", false
+	for i := 0; i < len(opts); i++ {
+		a := opts[i]
+		if len(a) < 2 || a[0] != '-' {
+			continue
+		}
+		for k := 1; k < len(a); k++ {
+			if !strings.ContainsRune(sshArgOptions, rune(a[k])) {
+				continue // a flag
+			}
+			v := a[k+1:]
+			if v == "" && i+1 < len(opts) {
+				i++
+				v = opts[i]
+			}
+			if a[k] == 'F' && v != "" {
+				f, ok = v, true
+			}
+			break
+		}
+	}
+	return f, ok
+}
+
+// configValue is the value of key in what ssh -G printed, or "".
+func configValue(config []byte, key string) string {
 	for line := range strings.Lines(string(config)) {
 		k, v, _ := strings.Cut(strings.TrimRight(line, "\r\n"), " ")
-		if strings.EqualFold(k, "controlpath") {
-			if strings.EqualFold(v, "none") {
-				return ""
-			}
+		if strings.EqualFold(k, key) {
 			return v
 		}
 	}

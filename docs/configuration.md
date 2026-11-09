@@ -84,9 +84,9 @@ name a peer other than the one pager lists.
   waiting_since and no_wait_until).
 - `hint` is what to do when the link needs you. For an ssh link it defaults to
   running `ssh HOST` once, which is what a laptop needs after a night's sleep.
-  When that login leaves a ControlMaster up, a link stopped over ssh's
-  credentials resumes by itself (see the laptop in
-  [scenarios.md](scenarios.md)).
+  When that login leaves a ControlMaster up, for the host or for a jump host
+  on its ProxyJump, a link stopped over ssh's credentials resumes by itself
+  (see the laptop in [scenarios.md](scenarios.md)).
 
 ### [link.NAME.ssh]
 
